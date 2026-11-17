@@ -1,18 +1,24 @@
 #include <a_samp>
 #include <samp_bcrypt>
 
-// SLAVIA ROLEPLAY 0.1.0: a small, independently written open.mp gamemode.
+// SLAVIA ROLEPLAY 0.2.0: a small, independently written open.mp gamemode.
 // Passwords are never saved as plain text. SQLite lives in scriptfiles/.
 // Production launch requires moderation, anti-cheat and deployment review.
 
-#define SLAVIA_VERSION      "0.1.0"
+#define SLAVIA_VERSION      "0.2.0"
 #define DATABASE_FILE       "slavia.db"
 #define DIALOG_REGISTER     (3400)
 #define DIALOG_LOGIN        (3401)
 #define MAX_AUTH_ATTEMPTS   (5)
 #define STARTING_CASH       (1500)
 #define COURIER_REWARD      (250)
-#define COURIER_COOLDOWN    (60000)
+#define COURIER_COOLDOWN_SECONDS (60)
+#define COURIER_PICKUP_X   (1462.0)
+#define COURIER_PICKUP_Y   (-1749.0)
+#define COURIER_PICKUP_Z   (13.5)
+#define COURIER_DROP_X     (1731.0)
+#define COURIER_DROP_Y     (-1652.0)
+#define COURIER_DROP_Z     (20.2)
 
 #define COLOR_WHITE         0xFFFFFFFF
 #define COLOR_PINK          0xF542A9FF
@@ -45,6 +51,7 @@ new Float:gPosZ[MAX_PLAYERS], Float:gPosA[MAX_PLAYERS];
 
 new gCourierStage[MAX_PLAYERS];
 new gCourierLastComplete[MAX_PLAYERS];
+new gCourierDeliveries[MAX_PLAYERS];
 
 forward OnSlaviaHashCreated(playerid, session);
 forward OnSlaviaPasswordChecked(playerid, bool:valid, session);
@@ -90,6 +97,7 @@ stock ResetSession(playerid)
     gPosA[playerid] = START_A;
     gCourierStage[playerid] = 0;
     gCourierLastComplete[playerid] = 0;
+    gCourierDeliveries[playerid] = 0;
     return 1;
 }
 
@@ -163,6 +171,71 @@ stock LoadCharacter(playerid)
     return 1;
 }
 
+stock bool:LoadCourierProgress(playerid)
+{
+    // Separate table preserves every account created by v0.1.0.
+    new query[240], DBResult:result;
+    format(query, sizeof(query),
+        "SELECT deliveries, last_completed FROM courier_progress WHERE nickname='%s' LIMIT 1",
+        gNicknames[playerid]);
+    result = db_query(gDatabase, query);
+    if (!result) return false;
+
+    gCourierDeliveries[playerid] = 0;
+    gCourierLastComplete[playerid] = 0;
+    if (db_num_rows(result) > 0)
+    {
+        gCourierDeliveries[playerid] = db_get_field_assoc_int(result, "deliveries");
+        gCourierLastComplete[playerid] = db_get_field_assoc_int(result, "last_completed");
+        if (gCourierDeliveries[playerid] < 0) gCourierDeliveries[playerid] = 0;
+        if (gCourierDeliveries[playerid] > 1000000) gCourierDeliveries[playerid] = 1000000;
+        if (gCourierLastComplete[playerid] < 0) gCourierLastComplete[playerid] = 0;
+    }
+    db_free_result(result);
+    return true;
+}
+
+stock bool:CompleteCourierDelivery(playerid)
+{
+    // Commit reward and progress together. Do not award money on database failure.
+    if (gCash[playerid] > 100000000 - COURIER_REWARD ||
+        gCourierDeliveries[playerid] >= 1000000) return false;
+
+    new newCash = gCash[playerid] + COURIER_REWARD;
+    new completed = gCourierDeliveries[playerid] + 1;
+    new now = gettime(), query[380];
+
+    if (!ExecuteSql("BEGIN IMMEDIATE TRANSACTION")) return false;
+    format(query, sizeof(query),
+        "UPDATE accounts SET cash=%d WHERE nickname='%s'",
+        newCash, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        return false;
+    }
+
+    format(query, sizeof(query),
+        "INSERT OR REPLACE INTO courier_progress (nickname, deliveries, last_completed) VALUES ('%s', %d, %d)",
+        gNicknames[playerid], completed, now);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        return false;
+    }
+    if (!ExecuteSql("COMMIT"))
+    {
+        ExecuteSql("ROLLBACK");
+        return false;
+    }
+
+    gCash[playerid] = newCash;
+    gCourierDeliveries[playerid] = completed;
+    gCourierLastComplete[playerid] = now;
+    GivePlayerMoney(playerid, COURIER_REWARD);
+    return true;
+}
+
 stock SaveCharacter(playerid)
 {
     if (!gAuthenticated[playerid]) return 0;
@@ -178,7 +251,8 @@ stock SaveCharacter(playerid)
     if (elapsed > 0)
     {
         gPlayMinutes[playerid] += elapsed;
-        gJoinedTick[playerid] = GetTickCount();
+        // Keep fractional minutes across repeated /save calls.
+        gJoinedTick[playerid] += elapsed * 60000;
     }
 
     new query[400];
@@ -192,7 +266,7 @@ stock SaveCharacter(playerid)
 
 stock EnterWorld(playerid)
 {
-    if (!LoadCharacter(playerid))
+    if (!LoadCharacter(playerid) || !LoadCourierProgress(playerid))
     {
         SendClientMessage(playerid, COLOR_ERROR, "Could not load character. Reconnect later.");
         Kick(playerid);
@@ -205,7 +279,7 @@ stock EnterWorld(playerid)
         0, 0, 0, 0, 0, 0);
     SpawnPlayer(playerid);
     SendClientMessage(playerid, COLOR_PINK, "Welcome to SLAVIA ROLEPLAY!");
-    SendClientMessage(playerid, COLOR_WHITE, "Use /help for commands and /courier to start your first job.");
+    SendClientMessage(playerid, COLOR_WHITE, "Commands: /help, /jobs, /courier, /jobstats.");
     return 1;
 }
 
@@ -228,7 +302,7 @@ stock SendLocalMessage(playerid, color, const message[], Float:radius)
 
 public OnGameModeInit()
 {
-    SetGameModeText("SLAVIA RP 0.1.0");
+    SetGameModeText("SLAVIA RP 0.2.0");
     ShowPlayerMarkers(PLAYER_MARKERS_MODE_OFF);
     EnableStuntBonusForAll(0);
     UsePlayerPedAnims();
@@ -246,7 +320,13 @@ public OnGameModeInit()
         SendRconCommand("exit");
         return 0;
     }
-    print("[SLAVIA] SQLite account storage initialized.");
+    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS courier_progress (nickname TEXT PRIMARY KEY COLLATE NOCASE, deliveries INTEGER NOT NULL DEFAULT 0, last_completed INTEGER NOT NULL DEFAULT 0)"))
+    {
+        print("[SLAVIA] FATAL: cannot initialize courier progress.");
+        SendRconCommand("exit");
+        return 0;
+    }
+    print("[SLAVIA] SQLite accounts and courier progress initialized.");
     return 1;
 }
 
@@ -327,11 +407,11 @@ public OnPlayerSpawn(playerid)
     SetPlayerColor(playerid, COLOR_PINK);
     if (gCourierStage[playerid] == 1)
     {
-        SetPlayerCheckpoint(playerid, 1462.0, -1749.0, 13.5, 3.5);
+        SetPlayerCheckpoint(playerid, COURIER_PICKUP_X, COURIER_PICKUP_Y, COURIER_PICKUP_Z, 3.5);
     }
     else if (gCourierStage[playerid] == 2)
     {
-        SetPlayerCheckpoint(playerid, 1731.0, -1652.0, 20.2, 3.5);
+        SetPlayerCheckpoint(playerid, COURIER_DROP_X, COURIER_DROP_Y, COURIER_DROP_Z, 3.5);
     }
     return 1;
 }
@@ -471,8 +551,9 @@ public OnPlayerCommandText(playerid, cmdtext[])
 
     if (!strcmp(cmdtext, "/help", true))
     {
-        SendClientMessage(playerid, COLOR_PINK, "SLAVIA: /stats, /save, /courier, /quitjob");
+        SendClientMessage(playerid, COLOR_PINK, "SLAVIA: /stats, /save, /jobs, /courier, /jobstats, /quitjob");
         SendClientMessage(playerid, COLOR_MUTED, "RP: /me [action], /do [event], /b [OOC]");
+        SendClientMessage(playerid, COLOR_MUTED, "Aliases: /rabota, /dostavki, /otmena");
         return 1;
     }
     if (!strcmp(cmdtext, "/stats", true))
@@ -492,26 +573,48 @@ public OnPlayerCommandText(playerid, cmdtext[])
             SendClientMessage(playerid, COLOR_ERROR, "Save failed.");
         return 1;
     }
-    if (!strcmp(cmdtext, "/courier", true))
+    if (!strcmp(cmdtext, "/jobs", true))
+    {
+        SendClientMessage(playerid, COLOR_PINK, "Courier: $250 for each successful delivery.");
+        SendClientMessage(playerid, COLOR_MUTED, "Begin near the city hall: /courier or /rabota.");
+        return 1;
+    }
+    if (!strcmp(cmdtext, "/jobstats", true) || !strcmp(cmdtext, "/dostavki", true))
+    {
+        new line[140];
+        format(line, sizeof(line), "Deliveries: %d | Total earned: $%d",
+            gCourierDeliveries[playerid], gCourierDeliveries[playerid] * COURIER_REWARD);
+        SendClientMessage(playerid, COLOR_PINK, line);
+        return 1;
+    }
+    if (!strcmp(cmdtext, "/courier", true) || !strcmp(cmdtext, "/rabota", true))
     {
         if (gCourierStage[playerid])
         {
             SendClientMessage(playerid, COLOR_MUTED, "You already have a delivery.");
             return 1;
         }
-        new elapsed = GetTickCount() - gCourierLastComplete[playerid];
-        if (gCourierLastComplete[playerid] != 0 && elapsed >= 0 &&
-            elapsed < COURIER_COOLDOWN)
+        if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+            GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0 ||
+            !IsPlayerInRangeOfPoint(playerid, 60.0, START_X, START_Y, START_Z))
         {
-            SendClientMessage(playerid, COLOR_ERROR, "Courier cooldown: try later.");
+            SendClientMessage(playerid, COLOR_ERROR, "Start courier work on foot near city hall.");
+            return 1;
+        }
+        new remaining = gCourierLastComplete[playerid] + COURIER_COOLDOWN_SECONDS - gettime();
+        if (gCourierLastComplete[playerid] != 0 && remaining > 0)
+        {
+            new line[100];
+            format(line, sizeof(line), "Courier cooldown: %d sec remaining.", remaining);
+            SendClientMessage(playerid, COLOR_ERROR, line);
             return 1;
         }
         gCourierStage[playerid] = 1;
-        SetPlayerCheckpoint(playerid, 1462.0, -1749.0, 13.5, 3.5);
+        SetPlayerCheckpoint(playerid, COURIER_PICKUP_X, COURIER_PICKUP_Y, COURIER_PICKUP_Z, 3.5);
         SendClientMessage(playerid, COLOR_PINK, "Courier: collect the parcel at the checkpoint.");
         return 1;
     }
-    if (!strcmp(cmdtext, "/quitjob", true))
+    if (!strcmp(cmdtext, "/quitjob", true) || !strcmp(cmdtext, "/otmena", true))
     {
         gCourierStage[playerid] = 0;
         DisablePlayerCheckpoint(playerid);
@@ -545,21 +648,30 @@ public OnPlayerCommandText(playerid, cmdtext[])
 public OnPlayerEnterCheckpoint(playerid)
 {
     if (!gAuthenticated[playerid]) return 1;
+    if (GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0) return 1;
+
     if (gCourierStage[playerid] == 1)
     {
+        if (!IsPlayerInRangeOfPoint(playerid, 6.0,
+            COURIER_PICKUP_X, COURIER_PICKUP_Y, COURIER_PICKUP_Z)) return 1;
+
         gCourierStage[playerid] = 2;
-        SetPlayerCheckpoint(playerid, 1731.0, -1652.0, 20.2, 3.5);
+        SetPlayerCheckpoint(playerid, COURIER_DROP_X, COURIER_DROP_Y, COURIER_DROP_Z, 3.5);
         SendClientMessage(playerid, COLOR_PINK, "Parcel collected. Deliver it to the next checkpoint.");
     }
     else if (gCourierStage[playerid] == 2)
     {
+        if (!IsPlayerInRangeOfPoint(playerid, 6.0,
+            COURIER_DROP_X, COURIER_DROP_Y, COURIER_DROP_Z)) return 1;
+        if (!CompleteCourierDelivery(playerid))
+        {
+            SendClientMessage(playerid, COLOR_ERROR, "Could not save delivery; retry later.");
+            return 1;
+        }
         gCourierStage[playerid] = 0;
-        gCourierLastComplete[playerid] = GetTickCount();
         DisablePlayerCheckpoint(playerid);
-        gCash[playerid] += COURIER_REWARD;
-        GivePlayerMoney(playerid, COURIER_REWARD);
         SaveCharacter(playerid);
-        SendClientMessage(playerid, COLOR_PINK, "Delivery completed! Earned $250.");
+        SendClientMessage(playerid, COLOR_PINK, "Delivery complete! Earned $250.");
     }
     return 1;
 }
