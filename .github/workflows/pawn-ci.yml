@@ -1,0 +1,37 @@
+name: Pawn build
+on:
+  push:
+    paths:
+      - 'Игра/**'
+      - '.github/workflows/pawn-ci.yml'
+  pull_request:
+    paths:
+      - 'Игра/**'
+      - '.github/workflows/pawn-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sampctl 1.16.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            'https://github.com/Southclaws/sampctl/releases/download/1.16.0/sampctl_1.16.0_linux_amd64.tar.gz' \
+            -o /tmp/sampctl.tar.gz
+          tar -xzf /tmp/sampctl.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/sampctl /usr/local/bin/sampctl
+          sampctl version
+      - name: Install dependencies and compile gamemode
+        env:
+          SAMPCTL_GITHUB_TOKEN: ${{ github.token }}
+        working-directory: Игра
+        shell: bash
+        run: |
+          set -euo pipefail
+          sampctl ensure
+          sampctl build
+          test -s gamemodes/slavia.amx
