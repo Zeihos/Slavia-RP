@@ -1,0 +1,33 @@
+name: PHP validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring
+          coverage: none
+      - name: PHP syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            php -l "$file" > /dev/null
+          done < <(find 'Сайт' 'Форум' 'Вики' -type f -name '*.php' -print0)
+      - name: Reject accidentally committed secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -Eq '(^|/)(\.env|\.install-key\.php|forum\.json|auth\.php)$'; then
+            echo 'Private configuration or runtime state tracked in Git' >&2
+            exit 1
+          fi
+      - name: Installation and HTTP smoke tests
+        run: bash tests/smoke.sh

@@ -1,0 +1,12 @@
+# Deployment-generated secrets, logs and persistent data
+/Сайт/private/data/.install-key.php
+/Сайт/private/data/.storage.lock
+/Сайт/private/data/auth.php
+/Сайт/private/data/tickets.php
+/Вики/storage/*
+!/Вики/storage/.gitkeep
+!/Вики/storage/.htaccess
+/Форум/storage/*
+!/Форум/storage/.gitkeep
+*.log
+.DS_Store
