@@ -17,9 +17,9 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
     $lock=fopen(STORE.'/install.lock','c+');if(!$lock)throw new RuntimeException('Нет доступа к storage.');
     flock($lock,LOCK_EX);
     if(installed())throw new RuntimeException('Установка уже выполнена.');
-    save_db(seed_data($username,$pwd));
+    $initialData=seed_data($username,$pwd);save_db($initialData);
     flock($lock,LOCK_UN);fclose($lock);
-    $_SESSION['uid']=1;session_regenerate_id(true);
+    $_SESSION['uid']=1;$_SESSION['auth_version']=hash('sha256',(string)$initialData['users']['1']['password_hash']);session_regenerate_id(true);
     flash('Форум установлен. Вы вошли как главный администратор.');nav('index.php?page=staff');
  }catch(Throwable $e){$error=$e->getMessage();}
 }

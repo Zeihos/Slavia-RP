@@ -18,8 +18,12 @@ function url(string $path='index.php',array $params=[]):string {return $path.($p
 function dbfile(string $name):string { if(!preg_match('/^[a-z_]+$/',$name))throw new RuntimeException('Wrong storage name');return WIKI_STORAGE.'/'.$name.'.json'; }
 function data_read(string $name):array {
     $file=dbfile($name); if(!is_file($file))return [];
-    $s=file_get_contents($file);$d=json_decode((string)$s,true);
-    return is_array($d)?$d:[];
+    $raw=file_get_contents($file);
+    if($raw===false)throw new RuntimeException('Невозможно прочитать Wiki: '.$name);
+    try {$decoded=json_decode($raw,true,512,JSON_THROW_ON_ERROR);}
+    catch(JsonException $exception){throw new RuntimeException('Повреждены данные Wiki: '.$name,0,$exception);}
+    if(!is_array($decoded))throw new RuntimeException('Неверный формат данных Wiki: '.$name);
+    return $decoded;
 }
 function data_save(string $name,array $data):void {
     if(!is_dir(WIKI_STORAGE))mkdir(WIKI_STORAGE,0750,true);
@@ -40,8 +44,7 @@ function data_update(string $name, callable $callback):array {
     $lock=fopen(WIKI_STORAGE.'/.'.$name.'.lock','c');
     if(!$lock||!flock($lock,LOCK_EX))throw new RuntimeException('Storage locked');
     try {
-        $file=dbfile($name);$current=is_file($file)?json_decode((string)file_get_contents($file),true):[];
-        if(!is_array($current))$current=[];
+        $file=dbfile($name);$current=data_read($name);
         $next=$callback($current);if(!is_array($next))throw new RuntimeException('Invalid data update');
         $tmp=tempnam(WIKI_STORAGE,'tmp_');if($tmp===false)throw new RuntimeException('Cannot create temp file');
         $json=json_encode($next,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT|JSON_THROW_ON_ERROR);
@@ -61,7 +64,21 @@ function csrf_check():void {if(!hash_equals(csrf_token(),(string)($_POST['csrf']
 function redirect(string $to):never {header('Location: '.$to, true, 303);exit;}
 function flash(string $message,string $type='success'):void {$_SESSION['flash']=['message'=>$message,'type'=>$type];}
 function get_flash():?array {$f=$_SESSION['flash']??null;unset($_SESSION['flash']);return $f;}
-function current_user():?array {$id=$_SESSION['uid']??null;if(!$id)return null;foreach(data_read('users') as $u)if(($u['id']??null)===$id)return $u;return null;}
+function current_user():?array {
+    $id=$_SESSION['uid']??null;
+    if(!$id)return null;
+    foreach(data_read('users') as $u) {
+        if(($u['id']??null)!==$id)continue;
+        $version=$_SESSION['auth_version']??null;
+        if(!is_string($version)||!hash_equals(hash('sha256',(string)($u['password_hash']??'')),$version)){
+            unset($_SESSION['uid'],$_SESSION['auth_version']);
+            return null;
+        }
+        return $u;
+    }
+    unset($_SESSION['uid'],$_SESSION['auth_version']);
+    return null;
+}
 function login_required():array {$u=current_user();if(!$u)redirect('login.php');return $u;}
 function slugify(string $v):string {
   $map=['а'=>'a','б'=>'b','в'=>'v','г'=>'g','д'=>'d','е'=>'e','ё'=>'yo','ж'=>'zh','з'=>'z','и'=>'i','й'=>'y','к'=>'k','л'=>'l','м'=>'m','н'=>'n','о'=>'o','п'=>'p','р'=>'r','с'=>'s','т'=>'t','у'=>'u','ф'=>'f','х'=>'h','ц'=>'ts','ч'=>'ch','ш'=>'sh','щ'=>'sch','ъ'=>'','ы'=>'y','ь'=>'','э'=>'e','ю'=>'yu','я'=>'ya'];

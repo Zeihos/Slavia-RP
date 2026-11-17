@@ -15,7 +15,7 @@ if($_SERVER['REQUEST_METHOD']==='POST') {
             $match=null;foreach($db['users'] as $u)if(lower($u['username'])===lower($username)){$match=$u;break;}
             if(!$match || !password_verify($pwd,$match['password_hash']))throw new RuntimeException('Неверное имя пользователя или пароль.');
             if(!empty($match['banned_until']) && ($match['banned_until']===-1 || $match['banned_until']>time())) throw new RuntimeException('Аккаунт заблокирован.');
-            session_regenerate_id(true);$_SESSION['uid']=$match['id'];flash('С возвращением, '.$match['username'].'!');
+            session_regenerate_id(true);$_SESSION['uid']=$match['id'];$_SESSION['auth_version']=hash('sha256',(string)$match['password_hash']);flash('С возвращением, '.$match['username'].'!');
             $target='index.php';
         } elseif($action==='register') {
             rate('register',4,3600);
@@ -26,11 +26,12 @@ if($_SERVER['REQUEST_METHOD']==='POST') {
             $pwd=(string)($_POST['password']??'');
             if(strlen($pwd)<10||strlen($pwd)>128)throw new RuntimeException('Длина пароля должна быть от 10 до 128 символов.');
             if($pwd!==(string)($_POST['password_again']??''))throw new RuntimeException('Пароли не совпадают.');
-            $id=db_write(function (&$d) use($name,$pwd) {
+            $pwdHash=password_hash($pwd,PASSWORD_DEFAULT);
+            $id=db_write(function (&$d) use($name,$pwdHash) {
                 foreach($d['users'] as $u)if(lower($u['username'])===lower($name))throw new RuntimeException('Это имя уже занято.');
-                $id=nextid($d,'users');$d['users'][(string)$id]=['id'=>$id,'username'=>$name,'password_hash'=>password_hash($pwd,PASSWORD_DEFAULT),'role'=>'user','created_at'=>time(),'banned_until'=>0];return $id;
+                $id=nextid($d,'users');$d['users'][(string)$id]=['id'=>$id,'username'=>$name,'password_hash'=>$pwdHash,'role'=>'user','created_at'=>time(),'banned_until'=>0];return $id;
             });
-            session_regenerate_id(true);$_SESSION['uid']=$id;flash('Аккаунт создан. Добро пожаловать на форум SLAVIA!');
+            session_regenerate_id(true);$_SESSION['uid']=$id;$_SESSION['auth_version']=hash('sha256',$pwdHash);flash('Аккаунт создан. Добро пожаловать на форум SLAVIA!');
         } elseif($action==='logout') {
             $_SESSION=[];session_regenerate_id(true);flash('Вы вышли из аккаунта.');
         } elseif($action==='change_password') {
@@ -40,10 +41,11 @@ if($_SERVER['REQUEST_METHOD']==='POST') {
             if(strlen($new)<10||strlen($new)>128)throw new RuntimeException('Новый пароль должен содержать от 10 до 128 символов.');
             if($old===$new)throw new RuntimeException('Новый пароль должен отличаться от текущего.');
             if($new!==(string)($_POST['password_again']??''))throw new RuntimeException('Новые пароли не совпадают.');
-            db_write(function (&$d)use($who,$new){
+            $pwdHash=password_hash($new,PASSWORD_DEFAULT);
+            db_write(function (&$d)use($who,$pwdHash){
                 if(!isset($d['users'][(string)$who['id']]))throw new RuntimeException('Аккаунт не найден.');
-                $d['users'][(string)$who['id']]['password_hash']=password_hash($new,PASSWORD_DEFAULT);
-            });session_regenerate_id(true);flash('Пароль успешно изменён.');$target='index.php?page=profile&id='.$who['id'];
+                $d['users'][(string)$who['id']]['password_hash']=$pwdHash;
+            });session_regenerate_id(true);$_SESSION['auth_version']=hash('sha256',$pwdHash);flash('Пароль изменён. Другие сеансы завершены.');$target='index.php?page=profile&id='.$who['id'];
         } elseif($action==='create_topic') {
             $who=need_user($me);rate('topic',6,600);
             $bid=(int)($_POST['board_id']??0);

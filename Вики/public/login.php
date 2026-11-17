@@ -7,7 +7,7 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
  if(time()<$lockUntil)$error='Слишком много попыток. Повтори вход позже.';
  else{
   $match=null;foreach(data_read('users') as $u)if(hash_equals($u['username'],$name)){$match=$u;break;}
-  if($match&&password_verify($password,$match['password_hash'])){session_regenerate_id(true);$_SESSION['uid']=$match['id'];unset($_SESSION['login_attempts'],$_SESSION['login_lock_until']);redirect('admin.php');}
+  if($match&&password_verify($password,$match['password_hash'])){session_regenerate_id(true);$_SESSION['uid']=$match['id'];$_SESSION['auth_version']=hash('sha256',(string)$match['password_hash']);unset($_SESSION['login_attempts'],$_SESSION['login_lock_until']);redirect('admin.php');}
   $_SESSION['login_attempts']=$attempts+1;if($attempts>=5)$_SESSION['login_lock_until']=time()+300;
   $error='Неверный логин или пароль.';
  }

@@ -16,9 +16,10 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
     if(installed()){$err='Установка уже выполнена.';}
     else{
       data_save('categories',seed_categories());data_save('articles',seed_articles());data_save('settings',[]);
-      data_save('users', [['id'=>1,'username'=>$username,'password_hash'=>password_hash($password,PASSWORD_DEFAULT),'created_at'=>gmdate('c')]]);
+      $passwordHash=password_hash($password,PASSWORD_DEFAULT);
+      data_save('users', [['id'=>1,'username'=>$username,'password_hash'=>$passwordHash,'created_at'=>gmdate('c')]]);
       data_save('revisions',[]);file_put_contents(WIKI_STORAGE.'/installed.lock',gmdate('c'));@chmod(WIKI_STORAGE.'/installed.lock',0640);
-      session_regenerate_id(true);$_SESSION['uid']=1;flash('База знаний установлена. Добро пожаловать в панель управления!');flock($fh,LOCK_UN);fclose($fh);redirect('admin.php');
+      session_regenerate_id(true);$_SESSION['uid']=1;$_SESSION['auth_version']=hash('sha256',$passwordHash);flash('База знаний установлена. Добро пожаловать в панель управления!');flock($fh,LOCK_UN);fclose($fh);redirect('admin.php');
     }
     flock($fh,LOCK_UN);fclose($fh);
   }

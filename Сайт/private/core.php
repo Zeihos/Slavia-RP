@@ -25,9 +25,16 @@ function store_read(string $name, mixed $fallback = []): mixed {
     $path = data_path($name);
     if (!is_file($path)) return $fallback;
     $raw = file_get_contents($path);
-    if ($raw === false || !str_starts_with($raw, GUARD_PREFIX)) return $fallback;
-    $value = json_decode(substr($raw, strlen(GUARD_PREFIX)), true);
-    return json_last_error() === JSON_ERROR_NONE ? $value : $fallback;
+    if ($raw === false || !str_starts_with($raw, GUARD_PREFIX)) {
+        throw new RuntimeException('Ошибка чтения хранилища: '.$name);
+    }
+    try {
+        $value = json_decode(substr($raw, strlen(GUARD_PREFIX)), true, 512, JSON_THROW_ON_ERROR);
+    } catch (JsonException $exception) {
+        throw new RuntimeException('Повреждены данные хранилища: '.$name, 0, $exception);
+    }
+    if (!is_array($value)) throw new RuntimeException('Неверный формат хранилища: '.$name);
+    return $value;
 }
 function store_write(string $name, mixed $value): void {
     if (!is_dir(DATA_ROOT) && !mkdir(DATA_ROOT, 0750, true) && !is_dir(DATA_ROOT)) throw new RuntimeException('Storage not writable');
@@ -118,3 +125,11 @@ function trimmed(string $key, int $max=2000): string {
     return (function_exists('mb_substr')?mb_substr(trim($val),0,$max):substr(trim($val),0,$max));
 }
 function slug_id(): string { return bin2hex(random_bytes(8)); }
+function admin_session_valid(array $auth): bool {
+    $passwordHash=(string)($auth['password_hash']??'');
+    $version=$_SESSION['admin_version']??null;
+    return $passwordHash!=='' && !empty($_SESSION['admin_auth'])
+        && (time()-(int)($_SESSION['admin_seen']??0))<3600
+        && is_string($version)
+        && hash_equals(hash('sha256',$passwordHash),$version);
+}
