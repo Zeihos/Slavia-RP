@@ -167,9 +167,9 @@ stock SaveCharacter(playerid)
 {
     if (!gAuthenticated[playerid]) return 0;
 
-    new state = GetPlayerState(playerid);
-    if (state == PLAYER_STATE_ONFOOT || state == PLAYER_STATE_DRIVER ||
-        state == PLAYER_STATE_PASSENGER)
+    new playerState = GetPlayerState(playerid);
+    if (playerState == PLAYER_STATE_ONFOOT || playerState == PLAYER_STATE_DRIVER ||
+        playerState == PLAYER_STATE_PASSENGER)
     {
         GetPlayerPos(playerid, gPosX[playerid], gPosY[playerid], gPosZ[playerid]);
         GetPlayerFacingAngle(playerid, gPosA[playerid]);
@@ -241,17 +241,7 @@ public OnGameModeInit()
         SendRconCommand("exit");
         return 0;
     }
-    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS accounts ("
-        "nickname TEXT PRIMARY KEY COLLATE NOCASE,"
-        "password_hash TEXT NOT NULL,"
-        "cash INTEGER NOT NULL DEFAULT 1500,"
-        "skin INTEGER NOT NULL DEFAULT 26,"
-        "minutes INTEGER NOT NULL DEFAULT 0,"
-        "x REAL NOT NULL DEFAULT 1481.0,"
-        "y REAL NOT NULL DEFAULT -1748.0,"
-        "z REAL NOT NULL DEFAULT 13.5469,"
-        "a REAL NOT NULL DEFAULT 0.0,"
-        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
+    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS accounts (nickname TEXT PRIMARY KEY COLLATE NOCASE, password_hash TEXT NOT NULL, cash INTEGER NOT NULL DEFAULT 1500, skin INTEGER NOT NULL DEFAULT 26, minutes INTEGER NOT NULL DEFAULT 0, x REAL NOT NULL DEFAULT 1481.0, y REAL NOT NULL DEFAULT -1748.0, z REAL NOT NULL DEFAULT 13.5469, a REAL NOT NULL DEFAULT 0.0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
     {
         SendRconCommand("exit");
         return 0;
