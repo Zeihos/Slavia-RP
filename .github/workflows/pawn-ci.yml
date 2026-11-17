@@ -26,6 +26,8 @@ jobs:
           sudo install -m 0755 /tmp/sampctl /usr/local/bin/sampctl
           sampctl version
       - name: Install dependencies and compile gamemode
+        env:
+          SAMPCTL_GITHUB_TOKEN: ${{ github.token }}
         working-directory: Игра
         shell: bash
         run: |
