@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Сообщество SLAVIA во ВКонтакте"
+    url: "https://vk.ru/slavia_rp"
+    about: "Новости проекта и общение"
+  - name: "SLAVIA в Telegram"
+    url: "https://t.me/slavia_rp"
+    about: "Новости и анонсы"
