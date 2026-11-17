@@ -1,0 +1,21 @@
+{
+  "name": "zeihos/slavia-rp-gamemode",
+  "version": "0.1.0",
+  "author": "SLAVIA ROLEPLAY",
+  "entry": "gamemodes/slavia.pwn",
+  "output": "gamemodes/slavia.amx",
+  "preset": "samp",
+  "dependencies": [
+    "pawn-lang/samp-stdlib",
+    "Sreyas-Sreelal/samp-bcrypt"
+  ],
+  "runtime": {
+    "version": "openmp",
+    "hostname": "SLAVIA ROLEPLAY | Development",
+    "port": 7777,
+    "maxplayers": 50,
+    "plugins": [
+      "samp_bcrypt"
+    ]
+  }
+}

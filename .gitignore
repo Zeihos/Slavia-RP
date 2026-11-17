@@ -10,3 +10,14 @@
 !/Форум/storage/.gitkeep
 *.log
 .DS_Store
+
+# Pawn/open.mp development output and local databases
+/Игра/gamemodes/*.amx
+/Игра/dependencies/
+/Игра/plugins/
+/Игра/components/
+/Игра/.sampctl/
+/Игра/scriptfiles/*.db
+/Игра/scriptfiles/*.db-*
+/Игра/config.json
+/Игра/server.cfg
