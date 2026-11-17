@@ -24,6 +24,8 @@ jobs:
           set -euo pipefail
           while IFS= read -r -d '' file; do
             php -l "$file" > /dev/null
-          done < <(find 'Сайт' 'Форум' 'Вики' -type f -name '*.php' -print0)
+          done < <(find 'Сайт' 'Форум' 'Вики' 'tests' -type f -name '*.php' -print0)
+      - name: Storage integrity and session regression tests
+        run: bash tests/regression.sh
       - name: Installation and HTTP smoke tests
         run: bash tests/smoke.sh

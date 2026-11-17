@@ -53,7 +53,14 @@ function lower(string $s): string {
 function n_chars(string $s): int {return preg_match_all('/./us',$s) ?: 0;}
 function user(array $db): ?array {
     $id=(string)($_SESSION['uid']??'');
-    return $id!==''&&isset($db['users'][$id]) ? $db['users'][$id] : null;
+    if($id==='' || !isset($db['users'][$id]))return null;
+    $account=$db['users'][$id];
+    $version=$_SESSION['auth_version']??null;
+    if(!is_string($version)||!hash_equals(hash('sha256',(string)$account['password_hash']),$version)){
+        unset($_SESSION['uid'],$_SESSION['auth_version']);
+        return null;
+    }
+    return $account;
 }
 function is_staff(?array $u): bool {return $u!==null && (empty($u['banned_until']) || ($u['banned_until']!==-1 && $u['banned_until']<=time())) && in_array($u['role'],['admin','moderator'],true);}
 function is_admin(?array $u): bool {return is_staff($u) && $u['role']==='admin';}

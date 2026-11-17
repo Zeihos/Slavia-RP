@@ -5,8 +5,8 @@ require __DIR__.'/private/config.php';
 header('X-Robots-Tag: noindex, nofollow');
 $auth=store_read('auth',[]);
 $installed=!empty($auth['password_hash']);
-$isAdmin=($installed && !empty($_SESSION['admin_auth']) && (time()-(int)($_SESSION['admin_seen']??0))<3600);
-if(!$isAdmin)unset($_SESSION['admin_auth']);else $_SESSION['admin_seen']=time();
+$isAdmin=($installed && admin_session_valid($auth));
+if(!$isAdmin)unset($_SESSION['admin_auth'],$_SESSION['admin_version']);else $_SESSION['admin_seen']=time();
 $tab=(string)($_GET['tab']??'dashboard');
 $tabs=['dashboard'=>'Обзор','settings'=>'Настройки','news'=>'Новости','servers'=>'Серверы','products'=>'Магазин','faq'=>'FAQ','tickets'=>'Обращения'];
 if(!isset($tabs[$tab]))$tab='dashboard';
@@ -24,15 +24,24 @@ function admin_post():void {
      if(!hash_equals(SLAVIA_INSTALL_KEY,value('install_key',100))) {set_flash('error','Неверный ключ установки.');redirect('admin.php');}
      $user=value('username',80);$pass=value('password',500);
      if(!preg_match('/^[a-zA-Z0-9_.-]{3,32}$/',$user)||strlen($pass)<12){set_flash('error','Логин: 3–32 символа (латиница, цифры, точка, _ или -). Пароль: от 12 символов.');redirect('admin.php');}
-     store_write('auth',['username'=>$user,'password_hash'=>password_hash($pass,PASSWORD_DEFAULT),'created'=>date('c')]);
+     $passwordHash=password_hash($pass,PASSWORD_DEFAULT);
+     try {
+         store_mutate('auth',static function($existing)use($user,$passwordHash){
+             if(!empty($existing['password_hash']))throw new RuntimeException('Уже установлено');
+             return ['username'=>$user,'password_hash'=>$passwordHash,'created'=>date('c')];
+         });
+     } catch(RuntimeException $exception) {
+         set_flash('error','Панель уже установлена либо хранилище недоступно.');redirect('admin.php');
+     }
      session_regenerate_id(true);$_SESSION['admin_auth']=true;$_SESSION['admin_seen']=time();
+     $_SESSION['admin_version']=hash('sha256',$passwordHash);
      set_flash('success','Панель настроена. Сохраните пароль. Ключ установки хранится только на сервере и не публикуется в Git.');redirect('admin.php');
  }
  if($installed && $action==='login') {
      if(((int)($_SESSION['login_lock_until']??0))>time()) {set_flash('error','Слишком много попыток. Повторите вход позже.');redirect('admin.php');}
      $username=value('username',80);$password=value('password',500);
      if(hash_equals((string)$auth['username'],$username)&&password_verify($password,(string)$auth['password_hash'])){
-         session_regenerate_id(true);$_SESSION['admin_auth']=true;$_SESSION['admin_seen']=time();unset($_SESSION['login_fails'],$_SESSION['login_lock_until']);redirect('admin.php');
+         session_regenerate_id(true);$_SESSION['admin_auth']=true;$_SESSION['admin_seen']=time();$_SESSION['admin_version']=hash('sha256',(string)$auth['password_hash']);unset($_SESSION['login_fails'],$_SESSION['login_lock_until']);redirect('admin.php');
      }
      $_SESSION['login_fails']=((int)($_SESSION['login_fails']??0))+1;
      if($_SESSION['login_fails']>=5)$_SESSION['login_lock_until']=time()+900;
@@ -54,7 +63,8 @@ function admin_post():void {
      $current=value('current_password',500);$new=value('new_password',500);
      if(!password_verify($current,(string)$auth['password_hash'])||strlen($new)<12) {set_flash('error','Текущий пароль неверный или новый короче 12 символов.');redirect(admin_url('settings'));}
      $auth['password_hash']=password_hash($new,PASSWORD_DEFAULT);store_write('auth',$auth);
-     set_flash('success','Пароль изменён.');redirect(admin_url('settings'));
+     session_regenerate_id(true);$_SESSION['admin_version']=hash('sha256',(string)$auth['password_hash']);
+     set_flash('success','Пароль изменён. Другие сеансы завершены.');redirect(admin_url('settings'));
  }
  $stores=['news'=>['title','excerpt','body','category','date'], 'servers'=>['name','description','host'], 'products'=>['name','description','price','checkout_url'], 'faq'=>['question','answer']];
  if($action==='save' && isset($stores[$tab])) {

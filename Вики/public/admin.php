@@ -64,7 +64,10 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
    $old=(string)($_POST['old_password']??'');$new=(string)($_POST['new_password']??'');
    if(!password_verify($old,$user['password_hash']))throw new RuntimeException('Текущий пароль неверен.');
    if(strlen($new)<12)throw new RuntimeException('Новый пароль: минимум 12 символов.');
-   data_update('users',function($xs)use($user,$new){foreach($xs as $i=>$u)if($u['id']===$user['id'])$xs[$i]['password_hash']=password_hash($new,PASSWORD_DEFAULT);return $xs;});flash('Пароль изменён.');redirect('admin.php?section=account');
+   $passwordHash=password_hash($new,PASSWORD_DEFAULT);
+   data_update('users',function($xs)use($user,$passwordHash){foreach($xs as $i=>$u)if($u['id']===$user['id'])$xs[$i]['password_hash']=$passwordHash;return $xs;});
+   session_regenerate_id(true);$_SESSION['auth_version']=hash('sha256',$passwordHash);
+   flash('Пароль изменён. Другие сеансы завершены.');redirect('admin.php?section=account');
   }
   throw new RuntimeException('Неизвестное действие.');
  }catch(Throwable $e){$errors[]=$e->getMessage();}
