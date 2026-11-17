@@ -35,6 +35,8 @@ jobs:
           sampctl ensure
           sampctl build
           test -s gamemodes/slavia.amx
+      - name: Check SQLite schema and persistent courier records
+        run: python3 tests/game_database.py
       - name: Publish compiled AMX for testing
         uses: actions/upload-artifact@v4
         with:
