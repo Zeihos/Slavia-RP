@@ -35,3 +35,10 @@ jobs:
           sampctl ensure
           sampctl build
           test -s gamemodes/slavia.amx
+      - name: Publish compiled AMX for testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: SLAVIA-RP-openmp-AMX
+          path: Игра/gamemodes/slavia.amx
+          if-no-files-found: error
+          retention-days: 14
