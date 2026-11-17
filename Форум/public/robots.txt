@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /install.php
+Disallow: /index.php?page=staff
+Disallow: /index.php?page=profile
