@@ -1,0 +1,44 @@
+name: "Предложить улучшение"
+description: "Новая игровая механика, функция сайта или улучшение интерфейса"
+title: "[Предложение]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Предложения рассматриваются в рамках текущего плана разработки. Описание должно быть конкретным и не предполагать, что функция уже реализована."
+  - type: dropdown
+    id: component
+    attributes:
+      label: "Что предлагаешь улучшить?"
+      options:
+        - "Игровой мод"
+        - "Сайт"
+        - "Форум"
+        - "База знаний"
+        - "Оформление"
+        - "Инфраструктура и сборка"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Описание идеи"
+      placeholder: "Что добавить или изменить и как это должно работать?"
+    validations:
+      required: true
+  - type: textarea
+    id: value
+    attributes:
+      label: "Зачем это нужно?"
+      placeholder: "Что станет удобнее для игроков или разработчиков?"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: "Как проверить готовность?"
+      placeholder: "Опиши конкретные признаки выполненной задачи"
+  - type: textarea
+    id: references
+    attributes:
+      label: "Примеры и материалы"
+      description: "Ссылки на открытые источники и собственные изображения, если есть"
