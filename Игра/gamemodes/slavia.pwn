@@ -1,11 +1,11 @@
 #include <a_samp>
 #include <samp_bcrypt>
 
-// SLAVIA ROLEPLAY 0.2.0: a small, independently written open.mp gamemode.
+// SLAVIA ROLEPLAY 0.3.0: a small, independently written open.mp gamemode.
 // Passwords are never saved as plain text. SQLite lives in scriptfiles/.
 // Production launch requires moderation, anti-cheat and deployment review.
 
-#define SLAVIA_VERSION      "0.2.0"
+#define SLAVIA_VERSION      "0.3.0"
 #define DATABASE_FILE       "slavia.db"
 #define DIALOG_REGISTER     (3400)
 #define DIALOG_LOGIN        (3401)
@@ -19,6 +19,15 @@
 #define COURIER_DROP_X     (1731.0)
 #define COURIER_DROP_Y     (-1652.0)
 #define COURIER_DROP_Z     (20.2)
+
+#define ITEM_BANDAGE       (1)
+#define ITEM_MEDKIT        (2)
+#define ITEM_BANDAGE_PRICE (75)
+#define ITEM_MEDKIT_PRICE  (300)
+#define ITEM_MAX_STACK     (10)
+#define ITEM_BANDAGE_HEAL  (15.0)
+#define ITEM_MEDKIT_HEAL   (45.0)
+#define SHOP_RADIUS        (35.0)
 
 #define COLOR_WHITE         0xFFFFFFFF
 #define COLOR_PINK          0xF542A9FF
@@ -52,6 +61,9 @@ new Float:gPosZ[MAX_PLAYERS], Float:gPosA[MAX_PLAYERS];
 new gCourierStage[MAX_PLAYERS];
 new gCourierLastComplete[MAX_PLAYERS];
 new gCourierDeliveries[MAX_PLAYERS];
+
+new gBandages[MAX_PLAYERS];
+new gMedkits[MAX_PLAYERS];
 
 forward OnSlaviaHashCreated(playerid, session);
 forward OnSlaviaPasswordChecked(playerid, bool:valid, session);
@@ -98,6 +110,8 @@ stock ResetSession(playerid)
     gCourierStage[playerid] = 0;
     gCourierLastComplete[playerid] = 0;
     gCourierDeliveries[playerid] = 0;
+    gBandages[playerid] = 0;
+    gMedkits[playerid] = 0;
     return 1;
 }
 
@@ -236,6 +250,159 @@ stock bool:CompleteCourierDelivery(playerid)
     return true;
 }
 
+// Starter inventory: two consumables, stored by account in SQLite.
+stock bool:LoadSupplies(playerid)
+{
+    new query[240], DBResult:result;
+    format(query, sizeof(query),
+        "SELECT bandages, medkits FROM supplies WHERE nickname='%s' LIMIT 1",
+        gNicknames[playerid]);
+    result = db_query(gDatabase, query);
+    if (!result) return false;
+
+    gBandages[playerid] = 0;
+    gMedkits[playerid] = 0;
+    if (db_num_rows(result) > 0)
+    {
+        gBandages[playerid] = db_get_field_assoc_int(result, "bandages");
+        gMedkits[playerid] = db_get_field_assoc_int(result, "medkits");
+        if (gBandages[playerid] < 0) gBandages[playerid] = 0;
+        if (gMedkits[playerid] < 0) gMedkits[playerid] = 0;
+        if (gBandages[playerid] > ITEM_MAX_STACK) gBandages[playerid] = ITEM_MAX_STACK;
+        if (gMedkits[playerid] > ITEM_MAX_STACK) gMedkits[playerid] = ITEM_MAX_STACK;
+    }
+    db_free_result(result);
+    return true;
+}
+
+// A failed SQLite write leaves wallet and inventory unchanged in memory.
+stock bool:CommitSupplyChange(playerid, bandages, medkits, balance)
+{
+    if (bandages < 0 || bandages > ITEM_MAX_STACK ||
+        medkits < 0 || medkits > ITEM_MAX_STACK ||
+        balance < 0 || balance > 100000000) return false;
+
+    new query[300];
+    if (!ExecuteSql("BEGIN IMMEDIATE TRANSACTION")) return false;
+    if (balance != gCash[playerid])
+    {
+        format(query, sizeof(query),
+            "UPDATE accounts SET cash=%d WHERE nickname='%s'",
+            balance, gNicknames[playerid]);
+        if (!ExecuteSql(query))
+        {
+            ExecuteSql("ROLLBACK");
+            return false;
+        }
+    }
+
+    format(query, sizeof(query),
+        "INSERT OR REPLACE INTO supplies (nickname, bandages, medkits) VALUES ('%s', %d, %d)",
+        gNicknames[playerid], bandages, medkits);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        return false;
+    }
+    if (!ExecuteSql("COMMIT"))
+    {
+        ExecuteSql("ROLLBACK");
+        return false;
+    }
+
+    if (balance != gCash[playerid]) GivePlayerMoney(playerid, balance - gCash[playerid]);
+    gCash[playerid] = balance;
+    gBandages[playerid] = bandages;
+    gMedkits[playerid] = medkits;
+    return true;
+}
+
+stock ShowInventory(playerid)
+{
+    new line[145];
+    format(line, sizeof(line), "Inventory: Bandages %d/%d | Medkits %d/%d",
+        gBandages[playerid], ITEM_MAX_STACK, gMedkits[playerid], ITEM_MAX_STACK);
+    SendClientMessage(playerid, COLOR_PINK, line);
+    SendClientMessage(playerid, COLOR_MUTED, "Use: /usebandage (+15 HP), /usemedkit (+45 HP).");
+    return 1;
+}
+
+stock BuySupply(playerid, itemid)
+{
+    if (itemid != ITEM_BANDAGE && itemid != ITEM_MEDKIT) return 0;
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0 ||
+        !IsPlayerInRangeOfPoint(playerid, SHOP_RADIUS, START_X, START_Y, START_Z))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Buy supplies on foot near city hall (/shop).");
+        return 1;
+    }
+
+    new cost = itemid == ITEM_BANDAGE ? ITEM_BANDAGE_PRICE : ITEM_MEDKIT_PRICE;
+    new bandages = gBandages[playerid], medkits = gMedkits[playerid];
+    if (gCash[playerid] < cost)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Not enough money for this purchase.");
+        return 1;
+    }
+    if (itemid == ITEM_BANDAGE && bandages >= ITEM_MAX_STACK ||
+        itemid == ITEM_MEDKIT && medkits >= ITEM_MAX_STACK)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Inventory stack is full (10 per item).");
+        return 1;
+    }
+
+    if (itemid == ITEM_BANDAGE) bandages++;
+    else medkits++;
+    if (!CommitSupplyChange(playerid, bandages, medkits, gCash[playerid] - cost))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Purchase failed. No money was deducted.");
+        return 1;
+    }
+    SendClientMessage(playerid, COLOR_PINK,
+        itemid == ITEM_BANDAGE ? "Bandage purchased for $75." : "Medkit purchased for $300.");
+    return 1;
+}
+
+stock UseSupply(playerid, itemid)
+{
+    if (itemid != ITEM_BANDAGE && itemid != ITEM_MEDKIT) return 0;
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Use medical supplies while on foot.");
+        return 1;
+    }
+    if (itemid == ITEM_BANDAGE && gBandages[playerid] < 1 ||
+        itemid == ITEM_MEDKIT && gMedkits[playerid] < 1)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Item missing. See /inventory and /shop.");
+        return 1;
+    }
+    new Float:health;
+    GetPlayerHealth(playerid, health);
+    if (health <= 0.0 || health >= 100.0)
+    {
+        SendClientMessage(playerid, COLOR_MUTED, "You cannot heal right now.");
+        return 1;
+    }
+
+    new bandages = gBandages[playerid], medkits = gMedkits[playerid];
+    if (itemid == ITEM_BANDAGE) bandages--;
+    else medkits--;
+    if (!CommitSupplyChange(playerid, bandages, medkits, gCash[playerid]))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Inventory could not be saved. Item not used.");
+        return 1;
+    }
+    new Float:heal = itemid == ITEM_BANDAGE ? ITEM_BANDAGE_HEAL : ITEM_MEDKIT_HEAL;
+    health += heal;
+    if (health > 100.0) health = 100.0;
+    SetPlayerHealth(playerid, health);
+    SendClientMessage(playerid, COLOR_PINK,
+        itemid == ITEM_BANDAGE ? "Bandage used (+15 HP)." : "Medkit used (+45 HP).");
+    return 1;
+}
+
 stock SaveCharacter(playerid)
 {
     if (!gAuthenticated[playerid]) return 0;
@@ -266,7 +433,7 @@ stock SaveCharacter(playerid)
 
 stock EnterWorld(playerid)
 {
-    if (!LoadCharacter(playerid) || !LoadCourierProgress(playerid))
+    if (!LoadCharacter(playerid) || !LoadCourierProgress(playerid) || !LoadSupplies(playerid))
     {
         SendClientMessage(playerid, COLOR_ERROR, "Could not load character. Reconnect later.");
         Kick(playerid);
@@ -279,7 +446,7 @@ stock EnterWorld(playerid)
         0, 0, 0, 0, 0, 0);
     SpawnPlayer(playerid);
     SendClientMessage(playerid, COLOR_PINK, "Welcome to SLAVIA ROLEPLAY!");
-    SendClientMessage(playerid, COLOR_WHITE, "Commands: /help, /jobs, /courier, /jobstats.");
+    SendClientMessage(playerid, COLOR_WHITE, "Commands: /help, /inventory, /shop, /jobs.");
     return 1;
 }
 
@@ -302,7 +469,7 @@ stock SendLocalMessage(playerid, color, const message[], Float:radius)
 
 public OnGameModeInit()
 {
-    SetGameModeText("SLAVIA RP 0.2.0");
+    SetGameModeText("SLAVIA RP 0.3.0");
     ShowPlayerMarkers(PLAYER_MARKERS_MODE_OFF);
     EnableStuntBonusForAll(0);
     UsePlayerPedAnims();
@@ -326,7 +493,13 @@ public OnGameModeInit()
         SendRconCommand("exit");
         return 0;
     }
-    print("[SLAVIA] SQLite accounts and courier progress initialized.");
+    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS supplies (nickname TEXT PRIMARY KEY COLLATE NOCASE, bandages INTEGER NOT NULL DEFAULT 0, medkits INTEGER NOT NULL DEFAULT 0)"))
+    {
+        print("[SLAVIA] FATAL: cannot initialize supply inventory.");
+        SendRconCommand("exit");
+        return 0;
+    }
+    print("[SLAVIA] SQLite accounts, courier progress and inventory initialized.");
     return 1;
 }
 
@@ -554,6 +727,8 @@ public OnPlayerCommandText(playerid, cmdtext[])
         SendClientMessage(playerid, COLOR_PINK, "SLAVIA: /stats, /save, /jobs, /courier, /jobstats, /quitjob");
         SendClientMessage(playerid, COLOR_MUTED, "RP: /me [action], /do [event], /b [OOC]");
         SendClientMessage(playerid, COLOR_MUTED, "Aliases: /rabota, /dostavki, /otmena");
+        SendClientMessage(playerid, COLOR_PINK, "Inventory: /inv, /shop, /buybandage, /buymedkit");
+        SendClientMessage(playerid, COLOR_MUTED, "Medical: /usebandage, /usemedkit");
         return 1;
     }
     if (!strcmp(cmdtext, "/stats", true))
@@ -573,6 +748,20 @@ public OnPlayerCommandText(playerid, cmdtext[])
             SendClientMessage(playerid, COLOR_ERROR, "Save failed.");
         return 1;
     }
+    if (!strcmp(cmdtext, "/inv", true) || !strcmp(cmdtext, "/inventory", true))
+    {
+        return ShowInventory(playerid);
+    }
+    if (!strcmp(cmdtext, "/shop", true))
+    {
+        SendClientMessage(playerid, COLOR_PINK, "Medical supplies: bandage $75 | medkit $300.");
+        SendClientMessage(playerid, COLOR_MUTED, "Buy on foot near city hall: /buybandage, /buymedkit.");
+        return 1;
+    }
+    if (!strcmp(cmdtext, "/buybandage", true)) return BuySupply(playerid, ITEM_BANDAGE);
+    if (!strcmp(cmdtext, "/buymedkit", true)) return BuySupply(playerid, ITEM_MEDKIT);
+    if (!strcmp(cmdtext, "/usebandage", true)) return UseSupply(playerid, ITEM_BANDAGE);
+    if (!strcmp(cmdtext, "/usemedkit", true)) return UseSupply(playerid, ITEM_MEDKIT);
     if (!strcmp(cmdtext, "/jobs", true))
     {
         SendClientMessage(playerid, COLOR_PINK, "Courier: $250 for each successful delivery.");
