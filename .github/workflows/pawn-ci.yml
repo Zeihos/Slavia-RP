@@ -3,10 +3,12 @@ on:
   push:
     paths:
       - 'Игра/**'
+      - 'tests/game_database.py'
       - '.github/workflows/pawn-ci.yml'
   pull_request:
     paths:
       - 'Игра/**'
+      - 'tests/game_database.py'
       - '.github/workflows/pawn-ci.yml'
   workflow_dispatch:
 
