@@ -14,7 +14,7 @@ expected = ("accounts", "courier_progress", "supplies", "owned_vehicles", "vehic
 assert len(schema) == len(expected), f"Expected {len(expected)} Pawn CREATE TABLEs, got {len(schema)}"
 assert all(name in ddl for name, ddl in zip(expected, schema))
 cash_update = re.findall(r'"(UPDATE accounts SET cash=%d WHERE nickname=\'%s\')"', source)
-assert len(cash_update) == 5, f"Expected 5 wallet updates, got {len(cash_update)}"
+assert len(cash_update) == 6, f"Expected 6 wallet updates, got {len(cash_update)}"
 courier_sql = re.findall(r'"(INSERT OR REPLACE INTO courier_progress [^"]+)"', source)
 supplies_sql = re.findall(r'"(INSERT OR REPLACE INTO supplies [^"]+)"', source)
 buy_car = re.findall(r'"(INSERT INTO owned_vehicles [^"]+)"', source)
@@ -22,7 +22,7 @@ park_car = re.findall(r'"(UPDATE owned_vehicles SET [^"]+)"', source)
 vehicle_state_buy = re.findall(r'"(INSERT INTO vehicle_state [^"]+)"', source)
 vehicle_state_upsert = re.findall(r'"(INSERT OR REPLACE INTO vehicle_state [^"]+)"', source)
 assert all(len(q) == 1 for q in (courier_sql, supplies_sql, buy_car, vehicle_state_buy))
-assert len(park_car) == 2
+assert len(park_car) == 3 and len(set(park_car)) == 1
 assert len(vehicle_state_upsert) == 2
 assert vehicle_state_upsert[0] == vehicle_state_upsert[1]
 

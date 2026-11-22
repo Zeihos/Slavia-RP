@@ -1,11 +1,11 @@
 #include <a_samp>
 #include <samp_bcrypt>
 
-// SLAVIA ROLEPLAY 0.6.0: a small, independently written open.mp gamemode.
+// SLAVIA ROLEPLAY 0.7.0: a small, independently written open.mp gamemode.
 // Passwords are never saved as plain text. SQLite lives in scriptfiles/.
 // Production launch requires moderation, anti-cheat and deployment review.
 
-#define SLAVIA_VERSION      "0.6.0"
+#define SLAVIA_VERSION      "0.7.0"
 #define DATABASE_FILE       "slavia.db"
 #define DIALOG_REGISTER     (3400)
 #define DIALOG_LOGIN        (3401)
@@ -47,6 +47,8 @@
 #define GARAGE_COLS        (5)
 #define GARAGE_RETURN_COST (200)
 #define GARAGE_RADIUS      (45.0)
+#define GARAGE_PARK_RADIUS (12.0)
+#define GARAGE_REPAIR_COST (350)
 
 #define COLOR_WHITE         0xFFFFFFFF
 #define COLOR_PINK          0xF542A9FF
@@ -759,6 +761,7 @@ stock ShowPersonalGarage(playerid)
     SendClientMessage(playerid, COLOR_PINK, line);
     format(line, sizeof(line), "Bay position: %.1f, %.1f | /vreturn at city hall", x, y);
     SendClientMessage(playerid, COLOR_MUTED, line);
+    SendClientMessage(playerid, COLOR_MUTED, "At your bay: /gstore, /gspawn, /grepair ($350).");
     return 1;
 }
 
@@ -845,12 +848,153 @@ stock ReturnPersonalCarToGarage(playerid)
     return 1;
 }
 
+
+stock bool:GetOwnedGarageLocation(playerid, &Float:x, &Float:y,
+    &Float:z, &Float:angle)
+{
+    if (gOwnedCarModel[playerid] == 0) return false;
+    if (gGarageBay[playerid] < 0 && !EnsureGarageBay(playerid)) return false;
+    if (gGarageBay[playerid] < 0 || gGarageBay[playerid] >= GARAGE_BAY_COUNT)
+        return false;
+    GarageBayCoordinates(gGarageBay[playerid], x, y, z, angle);
+    return true;
+}
+
+stock bool:IsOwnedCarInGarageBay(playerid)
+{
+    if (gOwnedCarEntity[playerid] == INVALID_VEHICLE_ID) return false;
+    new Float:x, Float:y, Float:z, Float:a;
+    if (!GetOwnedGarageLocation(playerid, x, y, z, a)) return false;
+    new Float:carX, Float:carY, Float:carZ;
+    GetVehiclePos(gOwnedCarEntity[playerid], carX, carY, carZ);
+    return floatabs(carX - x) <= GARAGE_PARK_RADIUS &&
+        floatabs(carY - y) <= GARAGE_PARK_RADIUS &&
+        floatabs(carZ - z) <= 5.0;
+}
+
+stock bool:IsPlayerAtOwnGarage(playerid)
+{
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerVirtualWorld(playerid) != 0 || GetPlayerInterior(playerid) != 0)
+        return false;
+    new Float:x, Float:y, Float:z, Float:a;
+    if (!GetOwnedGarageLocation(playerid, x, y, z, a)) return false;
+    return IsPlayerInRangeOfPoint(playerid, GARAGE_PARK_RADIUS, x, y, z) != 0;
+}
+
+// Move a nearby, unoccupied personal car into its reserved garage.
+// Parking is committed before the world vehicle is destroyed.
+stock StoreCarAtGarage(playerid)
+{
+    if (!IsPlayerAtOwnGarage(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Stand on foot at your garage bay (/garage).");
+        return 1;
+    }
+    if (!IsOwnedCarInGarageBay(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Park your spawned car at your own garage bay first.");
+        return 1;
+    }
+    if (PersonalCarHasOccupants(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Cannot store an occupied car.");
+        return 1;
+    }
+    new Float:x, Float:y, Float:z, Float:a;
+    if (!GetOwnedGarageLocation(playerid, x, y, z, a)) return 1;
+    new query[320];
+    format(query, sizeof(query),
+        "UPDATE owned_vehicles SET x=%f, y=%f, z=%f, a=%f WHERE nickname='%s'",
+        x, y, z, a, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Garage storage failed. Car remains on map.");
+        return 1;
+    }
+
+    DestroyVehicle(gOwnedCarEntity[playerid]);
+    gOwnedCarEntity[playerid] = INVALID_VEHICLE_ID;
+    gCarParkX[playerid] = x;
+    gCarParkY[playerid] = y;
+    gCarParkZ[playerid] = z;
+    gCarParkA[playerid] = a;
+    SendClientMessage(playerid, COLOR_PINK, "Car stored at your reserved garage bay.");
+    return 1;
+}
+
+stock SpawnCarFromGarage(playerid)
+{
+    if (!IsPlayerAtOwnGarage(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Go to your garage bay on foot (/garage).");
+        return 1;
+    }
+    // /gspawn must not teleport a car parked in another place.
+    new Float:x, Float:y, Float:z, Float:a;
+    if (!GetOwnedGarageLocation(playerid, x, y, z, a)) return 1;
+    if (floatabs(gCarParkX[playerid] - x) > 1.5 ||
+        floatabs(gCarParkY[playerid] - y) > 1.5 ||
+        floatabs(gCarParkZ[playerid] - z) > 1.5)
+    {
+        SendClientMessage(playerid, COLOR_ERROR,
+            "Car is parked elsewhere. Use /vspawn there or /vreturn at city hall.");
+        return 1;
+    }
+    return SpawnPersonalCar(playerid);
+}
+
+stock RepairCarAtGarage(playerid)
+{
+    if (!IsPlayerAtOwnGarage(playerid) || !IsOwnedCarInGarageBay(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Bring your spawned car to your garage bay.");
+        return 1;
+    }
+    if (PersonalCarHasOccupants(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "All occupants must leave before repair.");
+        return 1;
+    }
+    new Float:health;
+    if (!GetVehicleHealth(gOwnedCarEntity[playerid], health))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Vehicle is not available for repair.");
+        return 1;
+    }
+    if (health >= 995.0)
+    {
+        SendClientMessage(playerid, COLOR_MUTED, "The car does not need repairs.");
+        return 1;
+    }
+    if (gCash[playerid] < GARAGE_REPAIR_COST)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Garage repairs cost $350.");
+        return 1;
+    }
+    new nextBalance = gCash[playerid] - GARAGE_REPAIR_COST;
+    new query[220];
+    format(query, sizeof(query),
+        "UPDATE accounts SET cash=%d WHERE nickname='%s'",
+        nextBalance, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Repair payment failed. No charge made.");
+        return 1;
+    }
+    gCash[playerid] = nextBalance;
+    GivePlayerMoney(playerid, -GARAGE_REPAIR_COST);
+    SetVehicleHealth(gOwnedCarEntity[playerid], 1000.0);
+    SendClientMessage(playerid, COLOR_PINK, "Personal car repaired for $350.");
+    return 1;
+}
+
 stock BuyPersonalCar(playerid, model)
 {
     if (model != CAR_MODEL_ECONOMY && model != CAR_MODEL_PREMIUM) return 0;
     if (gOwnedCarModel[playerid] != 0)
     {
-        SendClientMessage(playerid, COLOR_ERROR, "Only one owned car per character in v0.6.");
+        SendClientMessage(playerid, COLOR_ERROR, "Only one owned car per character in v0.7.");
         return 1;
     }
     if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
@@ -1029,11 +1173,28 @@ stock StorePersonalCar(playerid)
         return 1;
     }
     if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerVirtualWorld(playerid) != 0 || GetPlayerInterior(playerid) != 0 ||
         !IsPlayerInRangeOfPoint(playerid, 20.0,
             gCarParkX[playerid], gCarParkY[playerid], gCarParkZ[playerid]))
     {
         SendClientMessage(playerid, COLOR_ERROR,
             "Exit the vehicle and stand near the saved parking location.");
+        return 1;
+    }
+    if (PersonalCarHasOccupants(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Cannot store a car with passengers.");
+        return 1;
+    }
+    new Float:carX, Float:carY, Float:carZ;
+    GetVehiclePos(gOwnedCarEntity[playerid], carX, carY, carZ);
+    if (floatabs(carX - gCarParkX[playerid]) > 20.0 ||
+        floatabs(carY - gCarParkY[playerid]) > 20.0 ||
+        floatabs(carZ - gCarParkZ[playerid]) > 8.0 ||
+        !IsPlayerInRangeOfPoint(playerid, 20.0, carX, carY, carZ))
+    {
+        SendClientMessage(playerid, COLOR_ERROR,
+            "Vehicle is too far away. Drive it to the saved parking spot.");
         return 1;
     }
     DestroyVehicle(gOwnedCarEntity[playerid]);
@@ -1115,7 +1276,7 @@ stock SendLocalMessage(playerid, color, const message[], Float:radius)
 
 public OnGameModeInit()
 {
-    SetGameModeText("SLAVIA RP 0.6.0");
+    SetGameModeText("SLAVIA RP 0.7.0");
     ShowPlayerMarkers(PLAYER_MARKERS_MODE_OFF);
     EnableStuntBonusForAll(0);
     UsePlayerPedAnims();
@@ -1402,7 +1563,7 @@ public OnPlayerCommandText(playerid, cmdtext[])
         SendClientMessage(playerid, COLOR_PINK, "Vehicles: /cars, /buycar 1, /buycar 2, /mycar");
         SendClientMessage(playerid, COLOR_MUTED, "Vehicle control: /vspawn, /vpark, /vstore");
         SendClientMessage(playerid, COLOR_MUTED, "Fuel & security: /vstatus, /vlock, /refuel");
-        SendClientMessage(playerid, COLOR_MUTED, "Garage: /garage (bay), /vreturn (tow for $200).");
+        SendClientMessage(playerid, COLOR_MUTED, "Garage: /garage, /gstore, /gspawn, /grepair, /vreturn.");
         return 1;
     }
     if (!strcmp(cmdtext, "/stats", true))
@@ -1469,6 +1630,9 @@ public OnPlayerCommandText(playerid, cmdtext[])
     if (!strcmp(cmdtext, "/refuel", true)) return RefuelPersonalCar(playerid);
     if (!strcmp(cmdtext, "/garage", true)) return ShowPersonalGarage(playerid);
     if (!strcmp(cmdtext, "/vreturn", true)) return ReturnPersonalCarToGarage(playerid);
+    if (!strcmp(cmdtext, "/gstore", true)) return StoreCarAtGarage(playerid);
+    if (!strcmp(cmdtext, "/gspawn", true)) return SpawnCarFromGarage(playerid);
+    if (!strcmp(cmdtext, "/grepair", true)) return RepairCarAtGarage(playerid);
     if (!strcmp(cmdtext, "/jobs", true))
     {
         SendClientMessage(playerid, COLOR_PINK, "Courier: $250 for each successful delivery.");
