@@ -4,11 +4,13 @@ on:
     paths:
       - 'Игра/**'
       - 'tests/game_database.py'
+      - 'tests/garage_database.py'
       - '.github/workflows/pawn-ci.yml'
   pull_request:
     paths:
       - 'Игра/**'
       - 'tests/game_database.py'
+      - 'tests/garage_database.py'
       - '.github/workflows/pawn-ci.yml'
   workflow_dispatch:
 
@@ -39,6 +41,8 @@ jobs:
           test -s gamemodes/slavia.amx
       - name: Check SQLite schema and persistent courier records
         run: python3 tests/game_database.py
+      - name: Check garage allocations and tow rollback
+        run: python3 tests/garage_database.py
       - name: Publish compiled AMX for testing
         uses: actions/upload-artifact@v4
         with:

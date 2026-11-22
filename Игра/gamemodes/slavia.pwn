@@ -729,8 +729,8 @@ stock bool:PersonalCarHasOccupants(playerid)
     for (new viewer = 0; viewer < MAX_PLAYERS; viewer++)
     {
         if (!IsPlayerConnected(viewer)) continue;
-        new state = GetPlayerState(viewer);
-        if (state != PLAYER_STATE_DRIVER && state != PLAYER_STATE_PASSENGER) continue;
+        new viewerState = GetPlayerState(viewer);
+        if (viewerState != PLAYER_STATE_DRIVER && viewerState != PLAYER_STATE_PASSENGER) continue;
         if (GetPlayerVehicleID(viewer) == vehicleid) return true;
     }
     return false;
