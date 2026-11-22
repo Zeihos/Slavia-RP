@@ -10,7 +10,7 @@ import tempfile
 
 src = (Path(__file__).resolve().parents[1] / "Игра/gamemodes/slavia.pwn").read_text("utf-8")
 ddl = re.findall(r'ExecuteSql\("(CREATE TABLE IF NOT EXISTS [^"]+)"\)', src)
-assert len(ddl) == 6 and "garage_bays" in ddl[-1]
+assert len(ddl) == 7 and "garage_bays" in ddl[5] and "money_transfers" in ddl[6]
 new_bays = re.findall(r'"(INSERT INTO garage_bays [^"]+)"', src)
 assert len(new_bays) == 2 and new_bays[0] == new_bays[1], "Both new and old owners need garage reservation"
 park = re.findall(r'"(UPDATE owned_vehicles SET [^"]+)"', src)
@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory() as root:
         # Existing customers, prior to the garage update.
         db.execute("INSERT INTO accounts (nickname,password_hash,cash) VALUES ('OldOwner','hash',500)")
         db.execute("INSERT INTO owned_vehicles (nickname, model, x,y,z,a) VALUES ('OldOwner',410,1000.,-1500.,20.,30.)")
-        db.execute(ddl[-1])
+        db.execute(ddl[5])
         db.execute(new_bays[0] % ("OldOwner", 0))
         db.execute("INSERT INTO accounts (nickname,password_hash,cash) VALUES ('NewOwner','hash',500)")
         db.execute("INSERT INTO owned_vehicles (nickname, model, x,y,z,a) VALUES ('NewOwner',426,1100.,-1600.,20.,30.)")

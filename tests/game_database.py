@@ -10,7 +10,7 @@ from pathlib import Path
 
 source = (Path(__file__).resolve().parents[1] / "Игра/gamemodes/slavia.pwn").read_text(encoding="utf-8")
 schema = re.findall(r'ExecuteSql\("(CREATE TABLE IF NOT EXISTS [^"]+)"\)', source)
-expected = ("accounts", "courier_progress", "supplies", "owned_vehicles", "vehicle_state", "garage_bays")
+expected = ("accounts", "courier_progress", "supplies", "owned_vehicles", "vehicle_state", "garage_bays", "money_transfers")
 assert len(schema) == len(expected), f"Expected {len(expected)} Pawn CREATE TABLEs, got {len(schema)}"
 assert all(name in ddl for name, ddl in zip(expected, schema))
 cash_update = re.findall(r'"(UPDATE accounts SET cash=%d WHERE nickname=\'%s\')"', source)

@@ -5,12 +5,14 @@ on:
       - 'Игра/**'
       - 'tests/game_database.py'
       - 'tests/garage_database.py'
+      - 'tests/player_payments.py'
       - '.github/workflows/pawn-ci.yml'
   pull_request:
     paths:
       - 'Игра/**'
       - 'tests/game_database.py'
       - 'tests/garage_database.py'
+      - 'tests/player_payments.py'
       - '.github/workflows/pawn-ci.yml'
   workflow_dispatch:
 
@@ -43,6 +45,8 @@ jobs:
         run: python3 tests/game_database.py
       - name: Check garage allocations and tow rollback
         run: python3 tests/garage_database.py
+      - name: Test cash transfers and rollback
+        run: python3 tests/player_payments.py
       - name: Publish compiled AMX for testing
         uses: actions/upload-artifact@v4
         with:
