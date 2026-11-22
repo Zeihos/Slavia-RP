@@ -35,10 +35,11 @@ with tempfile.TemporaryDirectory() as root:
 
         # Uniqueness: two users cannot be assigned the same permanent bay.
         db.execute("INSERT INTO accounts (nickname,password_hash,cash) VALUES ('Third','hash',500)")
+        db.commit()
         try:
             db.execute(new_bays[0] % ("Third", 0))
         except sqlite3.IntegrityError:
-            pass
+            db.rollback()
         else:
             raise AssertionError("Duplicate bay was accepted")
         # Valet: charging and returning the owned vehicle must commit together.
