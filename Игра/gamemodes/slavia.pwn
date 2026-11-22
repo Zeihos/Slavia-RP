@@ -879,7 +879,7 @@ stock bool:IsPlayerAtOwnGarage(playerid)
         return false;
     new Float:x, Float:y, Float:z, Float:a;
     if (!GetOwnedGarageLocation(playerid, x, y, z, a)) return false;
-    return IsPlayerInRangeOfPoint(playerid, GARAGE_PARK_RADIUS, x, y, z);
+    return IsPlayerInRangeOfPoint(playerid, GARAGE_PARK_RADIUS, x, y, z) != 0;
 }
 
 // Move a nearby, unoccupied personal car into its reserved garage.
