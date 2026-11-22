@@ -10,18 +10,19 @@ from pathlib import Path
 
 source = (Path(__file__).resolve().parents[1] / "Игра/gamemodes/slavia.pwn").read_text(encoding="utf-8")
 schema = re.findall(r'ExecuteSql\("(CREATE TABLE IF NOT EXISTS [^"]+)"\)', source)
-expected = ("accounts", "courier_progress", "supplies", "owned_vehicles", "vehicle_state")
+expected = ("accounts", "courier_progress", "supplies", "owned_vehicles", "vehicle_state", "garage_bays")
 assert len(schema) == len(expected), f"Expected {len(expected)} Pawn CREATE TABLEs, got {len(schema)}"
 assert all(name in ddl for name, ddl in zip(expected, schema))
 cash_update = re.findall(r'"(UPDATE accounts SET cash=%d WHERE nickname=\'%s\')"', source)
-assert len(cash_update) == 4, f"Expected 4 wallet updates, got {len(cash_update)}"
+assert len(cash_update) == 5, f"Expected 5 wallet updates, got {len(cash_update)}"
 courier_sql = re.findall(r'"(INSERT OR REPLACE INTO courier_progress [^"]+)"', source)
 supplies_sql = re.findall(r'"(INSERT OR REPLACE INTO supplies [^"]+)"', source)
 buy_car = re.findall(r'"(INSERT INTO owned_vehicles [^"]+)"', source)
 park_car = re.findall(r'"(UPDATE owned_vehicles SET [^"]+)"', source)
 vehicle_state_buy = re.findall(r'"(INSERT INTO vehicle_state [^"]+)"', source)
 vehicle_state_upsert = re.findall(r'"(INSERT OR REPLACE INTO vehicle_state [^"]+)"', source)
-assert all(len(q) == 1 for q in (courier_sql, supplies_sql, buy_car, park_car, vehicle_state_buy))
+assert all(len(q) == 1 for q in (courier_sql, supplies_sql, buy_car, vehicle_state_buy))
+assert len(park_car) == 2
 assert len(vehicle_state_upsert) == 2
 assert vehicle_state_upsert[0] == vehicle_state_upsert[1]
 
@@ -106,5 +107,6 @@ with tempfile.TemporaryDirectory() as work:
         assert reopened.execute("SELECT fuel,locked FROM vehicle_state WHERE nickname='NewOwner'").fetchone() == (100, 0)
         assert reopened.execute("SELECT model,x,y,z,a FROM owned_vehicles WHERE nickname='Tester'").fetchone() == (410, 1510., -1700., 13.4, 180.)
         assert reopened.execute("SELECT COUNT(*) FROM accounts").fetchone() == (2,)
+        assert reopened.execute("SELECT COUNT(*) FROM garage_bays").fetchone() == (0,)
 
 print("SLAVIA SQLite v0.1-v0.5 migrations, fuel/locks and rollback: PASS")
