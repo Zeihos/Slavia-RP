@@ -1,6 +1,6 @@
 {
   "name": "zeihos/slavia-rp-gamemode",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "SLAVIA ROLEPLAY",
   "entry": "gamemodes/slavia.pwn",
   "output": "gamemodes/slavia.amx",
