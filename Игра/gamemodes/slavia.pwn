@@ -1,11 +1,11 @@
 #include <a_samp>
 #include <samp_bcrypt>
 
-// SLAVIA ROLEPLAY 0.3.0: a small, independently written open.mp gamemode.
+// SLAVIA ROLEPLAY 0.4.0: a small, independently written open.mp gamemode.
 // Passwords are never saved as plain text. SQLite lives in scriptfiles/.
 // Production launch requires moderation, anti-cheat and deployment review.
 
-#define SLAVIA_VERSION      "0.3.0"
+#define SLAVIA_VERSION      "0.4.0"
 #define DATABASE_FILE       "slavia.db"
 #define DIALOG_REGISTER     (3400)
 #define DIALOG_LOGIN        (3401)
@@ -28,6 +28,18 @@
 #define ITEM_BANDAGE_HEAL  (15.0)
 #define ITEM_MEDKIT_HEAL   (45.0)
 #define SHOP_RADIUS        (35.0)
+
+#define CAR_MODEL_ECONOMY (410)
+#define CAR_MODEL_PREMIUM (426)
+#define CAR_PRICE_ECONOMY (1800)
+#define CAR_PRICE_PREMIUM (5500)
+#define CAR_BUY_RADIUS    (45.0)
+#define CAR_SPAWN_RADIUS  (35.0)
+#define CAR_SPAWN_DELAY   (20)
+#define CAR_LOT_X         (1466.0)
+#define CAR_LOT_Y         (-1742.0)
+#define CAR_LOT_Z         (13.2)
+#define CAR_LOT_A         (90.0)
 
 #define COLOR_WHITE         0xFFFFFFFF
 #define COLOR_PINK          0xF542A9FF
@@ -64,6 +76,13 @@ new gCourierDeliveries[MAX_PLAYERS];
 
 new gBandages[MAX_PLAYERS];
 new gMedkits[MAX_PLAYERS];
+
+// A character can own one personal vehicle in this early version.
+new gOwnedCarModel[MAX_PLAYERS];
+new gOwnedCarEntity[MAX_PLAYERS];
+new gCarLastSpawn[MAX_PLAYERS];
+new Float:gCarParkX[MAX_PLAYERS], Float:gCarParkY[MAX_PLAYERS];
+new Float:gCarParkZ[MAX_PLAYERS], Float:gCarParkA[MAX_PLAYERS];
 
 forward OnSlaviaHashCreated(playerid, session);
 forward OnSlaviaPasswordChecked(playerid, bool:valid, session);
@@ -112,6 +131,13 @@ stock ResetSession(playerid)
     gCourierDeliveries[playerid] = 0;
     gBandages[playerid] = 0;
     gMedkits[playerid] = 0;
+    gOwnedCarModel[playerid] = 0;
+    gOwnedCarEntity[playerid] = INVALID_VEHICLE_ID;
+    gCarLastSpawn[playerid] = 0;
+    gCarParkX[playerid] = CAR_LOT_X;
+    gCarParkY[playerid] = CAR_LOT_Y;
+    gCarParkZ[playerid] = CAR_LOT_Z;
+    gCarParkA[playerid] = CAR_LOT_A;
     return 1;
 }
 
@@ -403,6 +429,213 @@ stock UseSupply(playerid, itemid)
     return 1;
 }
 
+// A separate table preserves v0.1-v0.3 accounts, supplies and courier data.
+stock bool:LoadPersonalCar(playerid)
+{
+    new query[260], DBResult:result;
+    format(query, sizeof(query),
+        "SELECT model, x, y, z, a FROM owned_vehicles WHERE nickname='%s' LIMIT 1",
+        gNicknames[playerid]);
+    result = db_query(gDatabase, query);
+    if (!result) return false;
+
+    gOwnedCarModel[playerid] = 0;
+    if (db_num_rows(result) > 0)
+    {
+        new model = db_get_field_assoc_int(result, "model");
+        if (model != CAR_MODEL_ECONOMY && model != CAR_MODEL_PREMIUM)
+        {
+            db_free_result(result);
+            print("[SLAVIA] Invalid saved personal vehicle model.");
+            return false;
+        }
+        gOwnedCarModel[playerid] = model;
+        gCarParkX[playerid] = db_get_field_assoc_float(result, "x");
+        gCarParkY[playerid] = db_get_field_assoc_float(result, "y");
+        gCarParkZ[playerid] = db_get_field_assoc_float(result, "z");
+        gCarParkA[playerid] = db_get_field_assoc_float(result, "a");
+
+        // Bad coordinates must not cause an unsafe vehicle spawn.
+        if (gCarParkX[playerid] < -3000.0 || gCarParkX[playerid] > 3000.0 ||
+            gCarParkY[playerid] < -3000.0 || gCarParkY[playerid] > 3000.0 ||
+            gCarParkZ[playerid] < -100.0 || gCarParkZ[playerid] > 2000.0)
+        {
+            gCarParkX[playerid] = CAR_LOT_X;
+            gCarParkY[playerid] = CAR_LOT_Y;
+            gCarParkZ[playerid] = CAR_LOT_Z;
+            gCarParkA[playerid] = CAR_LOT_A;
+        }
+    }
+    db_free_result(result);
+    return true;
+}
+
+stock BuyPersonalCar(playerid, model)
+{
+    if (model != CAR_MODEL_ECONOMY && model != CAR_MODEL_PREMIUM) return 0;
+    if (gOwnedCarModel[playerid] != 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Only one owned car per character in v0.4.");
+        return 1;
+    }
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0 ||
+        !IsPlayerInRangeOfPoint(playerid, CAR_BUY_RADIUS, START_X, START_Y, START_Z))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Buy a car on foot near city hall.");
+        return 1;
+    }
+
+    new cost = model == CAR_MODEL_ECONOMY ? CAR_PRICE_ECONOMY : CAR_PRICE_PREMIUM;
+    if (gCash[playerid] < cost)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Not enough cash for this vehicle.");
+        return 1;
+    }
+
+    // Give different connected players different temporary starter parking slots.
+    new Float:x = CAR_LOT_X + float(playerid % 5) * 5.0;
+    new Float:y = CAR_LOT_Y + float(playerid / 5) * 7.0;
+    new Float:z = CAR_LOT_Z, Float:angle = CAR_LOT_A;
+    new newBalance = gCash[playerid] - cost, query[350];
+
+    if (!ExecuteSql("BEGIN IMMEDIATE TRANSACTION")) return 0;
+    format(query, sizeof(query),
+        "UPDATE accounts SET cash=%d WHERE nickname='%s'",
+        newBalance, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Car purchase failed. Money unchanged.");
+        return 1;
+    }
+    format(query, sizeof(query),
+        "INSERT INTO owned_vehicles (nickname, model, x, y, z, a) VALUES ('%s', %d, %f, %f, %f, %f)",
+        gNicknames[playerid], model, x, y, z, angle);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Car purchase failed. Vehicle not issued.");
+        return 1;
+    }
+    if (!ExecuteSql("COMMIT"))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Cannot confirm purchase. Check server logs.");
+        return 1;
+    }
+
+    gOwnedCarModel[playerid] = model;
+    gCarParkX[playerid] = x;
+    gCarParkY[playerid] = y;
+    gCarParkZ[playerid] = z;
+    gCarParkA[playerid] = angle;
+    gCash[playerid] = newBalance;
+    GivePlayerMoney(playerid, -cost);
+    SendClientMessage(playerid, COLOR_PINK,
+        model == CAR_MODEL_ECONOMY ? "Manana purchased. Use /vspawn near parking." :
+                                     "Premier purchased. Use /vspawn near parking.");
+    return 1;
+}
+
+stock SpawnPersonalCar(playerid)
+{
+    if (gOwnedCarModel[playerid] == 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "No owned car. See /cars.");
+        return 1;
+    }
+    if (gOwnedCarEntity[playerid] != INVALID_VEHICLE_ID)
+    {
+        SendClientMessage(playerid, COLOR_MUTED, "Car already spawned. Use /vstore first.");
+        return 1;
+    }
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0 ||
+        !IsPlayerInRangeOfPoint(playerid, CAR_SPAWN_RADIUS,
+            gCarParkX[playerid], gCarParkY[playerid], gCarParkZ[playerid]))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Go to your last parked position on foot.");
+        return 1;
+    }
+    new remaining = gCarLastSpawn[playerid] + CAR_SPAWN_DELAY - gettime();
+    if (gCarLastSpawn[playerid] != 0 && remaining > 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Vehicle spawn cooldown: 20 seconds.");
+        return 1;
+    }
+
+    new vehicleid = CreateVehicle(gOwnedCarModel[playerid],
+        gCarParkX[playerid], gCarParkY[playerid], gCarParkZ[playerid],
+        gCarParkA[playerid], 1, 1, -1);
+    if (vehicleid == INVALID_VEHICLE_ID || vehicleid == 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "No free vehicle slot. Try later.");
+        return 1;
+    }
+    gOwnedCarEntity[playerid] = vehicleid;
+    gCarLastSpawn[playerid] = gettime();
+    SendClientMessage(playerid, COLOR_PINK, "Personal car spawned. /vpark /vstore.");
+    return 1;
+}
+
+stock ParkPersonalCar(playerid)
+{
+    if (gOwnedCarEntity[playerid] == INVALID_VEHICLE_ID ||
+        GetPlayerState(playerid) != PLAYER_STATE_DRIVER ||
+        GetPlayerVehicleID(playerid) != gOwnedCarEntity[playerid] ||
+        GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "You must drive your own car outside to park it.");
+        return 1;
+    }
+    new Float:x, Float:y, Float:z, Float:angle;
+    GetVehiclePos(gOwnedCarEntity[playerid], x, y, z);
+    GetVehicleZAngle(gOwnedCarEntity[playerid], angle);
+    if (x < -3000.0 || x > 3000.0 || y < -3000.0 || y > 3000.0 ||
+        z < -100.0 || z > 2000.0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Cannot save parking at this position.");
+        return 1;
+    }
+    new query[320];
+    format(query, sizeof(query),
+        "UPDATE owned_vehicles SET x=%f, y=%f, z=%f, a=%f WHERE nickname='%s'",
+        x, y, z, angle, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Parking save failed. Location unchanged.");
+        return 1;
+    }
+    gCarParkX[playerid] = x;
+    gCarParkY[playerid] = y;
+    gCarParkZ[playerid] = z;
+    gCarParkA[playerid] = angle;
+    SendClientMessage(playerid, COLOR_PINK, "Parking saved. Use /vstore before leaving.");
+    return 1;
+}
+
+stock StorePersonalCar(playerid)
+{
+    if (gOwnedCarEntity[playerid] == INVALID_VEHICLE_ID)
+    {
+        SendClientMessage(playerid, COLOR_MUTED, "Your personal car is already stored.");
+        return 1;
+    }
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        !IsPlayerInRangeOfPoint(playerid, 20.0,
+            gCarParkX[playerid], gCarParkY[playerid], gCarParkZ[playerid]))
+    {
+        SendClientMessage(playerid, COLOR_ERROR,
+            "Exit the vehicle and stand near the saved parking location.");
+        return 1;
+    }
+    DestroyVehicle(gOwnedCarEntity[playerid]);
+    gOwnedCarEntity[playerid] = INVALID_VEHICLE_ID;
+    SendClientMessage(playerid, COLOR_PINK, "Personal car stored.");
+    return 1;
+}
+
 stock SaveCharacter(playerid)
 {
     if (!gAuthenticated[playerid]) return 0;
@@ -433,7 +666,7 @@ stock SaveCharacter(playerid)
 
 stock EnterWorld(playerid)
 {
-    if (!LoadCharacter(playerid) || !LoadCourierProgress(playerid) || !LoadSupplies(playerid))
+    if (!LoadCharacter(playerid) || !LoadCourierProgress(playerid) || !LoadSupplies(playerid) || !LoadPersonalCar(playerid))
     {
         SendClientMessage(playerid, COLOR_ERROR, "Could not load character. Reconnect later.");
         Kick(playerid);
@@ -446,7 +679,7 @@ stock EnterWorld(playerid)
         0, 0, 0, 0, 0, 0);
     SpawnPlayer(playerid);
     SendClientMessage(playerid, COLOR_PINK, "Welcome to SLAVIA ROLEPLAY!");
-    SendClientMessage(playerid, COLOR_WHITE, "Commands: /help, /inventory, /shop, /jobs.");
+    SendClientMessage(playerid, COLOR_WHITE, "Commands: /help, /inventory, /cars, /jobs.");
     return 1;
 }
 
@@ -469,7 +702,7 @@ stock SendLocalMessage(playerid, color, const message[], Float:radius)
 
 public OnGameModeInit()
 {
-    SetGameModeText("SLAVIA RP 0.3.0");
+    SetGameModeText("SLAVIA RP 0.4.0");
     ShowPlayerMarkers(PLAYER_MARKERS_MODE_OFF);
     EnableStuntBonusForAll(0);
     UsePlayerPedAnims();
@@ -499,7 +732,13 @@ public OnGameModeInit()
         SendRconCommand("exit");
         return 0;
     }
-    print("[SLAVIA] SQLite accounts, courier progress and inventory initialized.");
+    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS owned_vehicles (nickname TEXT PRIMARY KEY COLLATE NOCASE, model INTEGER NOT NULL, x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL, a REAL NOT NULL)"))
+    {
+        print("[SLAVIA] FATAL: cannot initialize personal vehicles.");
+        SendRconCommand("exit");
+        return 0;
+    }
+    print("[SLAVIA] SQLite accounts, courier, inventory and vehicles initialized.");
     return 1;
 }
 
@@ -553,6 +792,11 @@ public OnPlayerConnect(playerid)
 
 public OnPlayerDisconnect(playerid, reason)
 {
+    if (gOwnedCarEntity[playerid] != INVALID_VEHICLE_ID)
+    {
+        DestroyVehicle(gOwnedCarEntity[playerid]);
+        gOwnedCarEntity[playerid] = INVALID_VEHICLE_ID;
+    }
     SaveCharacter(playerid);
     gSessionId[playerid] = ++gSessionSequence;
     ResetSession(playerid);
@@ -729,6 +973,8 @@ public OnPlayerCommandText(playerid, cmdtext[])
         SendClientMessage(playerid, COLOR_MUTED, "Aliases: /rabota, /dostavki, /otmena");
         SendClientMessage(playerid, COLOR_PINK, "Inventory: /inv, /shop, /buybandage, /buymedkit");
         SendClientMessage(playerid, COLOR_MUTED, "Medical: /usebandage, /usemedkit");
+        SendClientMessage(playerid, COLOR_PINK, "Vehicles: /cars, /buycar 1, /buycar 2, /mycar");
+        SendClientMessage(playerid, COLOR_MUTED, "Vehicle control: /vspawn, /vpark, /vstore");
         return 1;
     }
     if (!strcmp(cmdtext, "/stats", true))
@@ -762,6 +1008,34 @@ public OnPlayerCommandText(playerid, cmdtext[])
     if (!strcmp(cmdtext, "/buymedkit", true)) return BuySupply(playerid, ITEM_MEDKIT);
     if (!strcmp(cmdtext, "/usebandage", true)) return UseSupply(playerid, ITEM_BANDAGE);
     if (!strcmp(cmdtext, "/usemedkit", true)) return UseSupply(playerid, ITEM_MEDKIT);
+    if (!strcmp(cmdtext, "/cars", true))
+    {
+        SendClientMessage(playerid, COLOR_PINK, "Vehicle shop at city hall (on foot):");
+        SendClientMessage(playerid, COLOR_WHITE, "/buycar 1 - Manana ($1800); /buycar 2 - Premier ($5500)");
+        SendClientMessage(playerid, COLOR_MUTED, "One vehicle per character. Buy, then /vspawn at parking.");
+        return 1;
+    }
+    if (!strcmp(cmdtext, "/mycar", true))
+    {
+        if (gOwnedCarModel[playerid] == 0)
+            SendClientMessage(playerid, COLOR_MUTED, "No owned vehicle. Use /cars.");
+        else
+            SendClientMessage(playerid, COLOR_PINK,
+                gOwnedCarModel[playerid] == CAR_MODEL_ECONOMY ?
+                "Owned vehicle: Manana | /vspawn, /vpark, /vstore." :
+                "Owned vehicle: Premier | /vspawn, /vpark, /vstore.");
+        return 1;
+    }
+    if (!strcmp(cmdtext, "/buycar 1", true)) return BuyPersonalCar(playerid, CAR_MODEL_ECONOMY);
+    if (!strcmp(cmdtext, "/buycar 2", true)) return BuyPersonalCar(playerid, CAR_MODEL_PREMIUM);
+    if (!strcmp(cmdtext, "/buycar", true))
+    {
+        SendClientMessage(playerid, COLOR_MUTED, "Usage: /buycar 1 or /buycar 2.");
+        return 1;
+    }
+    if (!strcmp(cmdtext, "/vspawn", true)) return SpawnPersonalCar(playerid);
+    if (!strcmp(cmdtext, "/vpark", true)) return ParkPersonalCar(playerid);
+    if (!strcmp(cmdtext, "/vstore", true)) return StorePersonalCar(playerid);
     if (!strcmp(cmdtext, "/jobs", true))
     {
         SendClientMessage(playerid, COLOR_PINK, "Courier: $250 for each successful delivery.");
@@ -861,6 +1135,39 @@ public OnPlayerEnterCheckpoint(playerid)
         DisablePlayerCheckpoint(playerid);
         SaveCharacter(playerid);
         SendClientMessage(playerid, COLOR_PINK, "Delivery complete! Earned $250.");
+    }
+    return 1;
+}
+
+public OnPlayerStateChange(playerid, newstate, oldstate)
+{
+    // Driver seat belongs to the owner, but passengers are permitted.
+    if (newstate != PLAYER_STATE_DRIVER) return 1;
+    new vehicleid = GetPlayerVehicleID(playerid);
+    for (new ownerid = 0; ownerid < MAX_PLAYERS; ownerid++)
+    {
+        if (!IsPlayerConnected(ownerid) || !gAuthenticated[ownerid]) continue;
+        if (gOwnedCarEntity[ownerid] != vehicleid) continue;
+        if (ownerid != playerid)
+        {
+            RemovePlayerFromVehicle(playerid);
+            SendClientMessage(playerid, COLOR_ERROR, "This personal car belongs to another player.");
+        }
+        break;
+    }
+    return 1;
+}
+
+public OnVehicleDeath(vehicleid, killerid)
+{
+    for (new ownerid = 0; ownerid < MAX_PLAYERS; ownerid++)
+    {
+        if (!IsPlayerConnected(ownerid) || !gAuthenticated[ownerid]) continue;
+        if (gOwnedCarEntity[ownerid] != vehicleid) continue;
+        gOwnedCarEntity[ownerid] = INVALID_VEHICLE_ID;
+        SendClientMessage(ownerid, COLOR_ERROR, "Your car was destroyed; return to parking and use /vspawn.");
+        DestroyVehicle(vehicleid);
+        break;
     }
     return 1;
 }
