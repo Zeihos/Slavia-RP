@@ -1,16 +1,20 @@
 #include <a_samp>
 #include <samp_bcrypt>
 
-// SLAVIA ROLEPLAY 0.7.0: a small, independently written open.mp gamemode.
+// SLAVIA ROLEPLAY 0.8.0: a small, independently written open.mp gamemode.
 // Passwords are never saved as plain text. SQLite lives in scriptfiles/.
 // Production launch requires moderation, anti-cheat and deployment review.
 
-#define SLAVIA_VERSION      "0.7.0"
+#define SLAVIA_VERSION      "0.8.0"
 #define DATABASE_FILE       "slavia.db"
 #define DIALOG_REGISTER     (3400)
 #define DIALOG_LOGIN        (3401)
 #define MAX_AUTH_ATTEMPTS   (5)
 #define STARTING_CASH       (1500)
+#define MONEY_MAX_BALANCE    (100000000)
+#define PAY_MAX_AMOUNT       (5000)
+#define PAY_COOLDOWN_SECONDS (5)
+#define PAY_MAX_DISTANCE     (5.0)
 #define COURIER_REWARD      (250)
 #define COURIER_COOLDOWN_SECONDS (60)
 #define COURIER_PICKUP_X   (1462.0)
@@ -73,6 +77,7 @@ new gNicknames[MAX_PLAYERS][MAX_PLAYER_NAME + 1];
 new gPasswordHashes[MAX_PLAYERS][BCRYPT_HASH_LENGTH];
 
 new gCash[MAX_PLAYERS];
+new gLastPayTime[MAX_PLAYERS];
 new gSkin[MAX_PLAYERS];
 new gPlayMinutes[MAX_PLAYERS];
 new gJoinedTick[MAX_PLAYERS];
@@ -132,6 +137,7 @@ stock ResetSession(playerid)
     gNicknames[playerid][0] = '\0';
     gPasswordHashes[playerid][0] = '\0';
     gCash[playerid] = STARTING_CASH;
+    gLastPayTime[playerid] = 0;
     gSkin[playerid] = 26;
     gPlayMinutes[playerid] = 0;
     gJoinedTick[playerid] = 0;
@@ -167,6 +173,147 @@ stock bool:ExecuteSql(const sql[])
     }
     db_free_result(result);
     return true;
+}
+
+
+stock bool:SqlChangedOne()
+{
+    // SQLite changes() is scoped to the connection; all queries here are synchronous.
+    new DBResult:result = db_query(gDatabase, "SELECT changes() AS changed_rows");
+    if (!result) return false;
+    new changed = db_get_field_assoc_int(result, "changed_rows");
+    db_free_result(result);
+    return changed == 1;
+}
+
+stock bool:ParseUnsignedPayNumber(const command[], &offset, &value)
+{
+    while (command[offset] == ' ') offset++;
+    if (command[offset] < '0' || command[offset] > '9') return false;
+    value = 0;
+    while (command[offset] >= '0' && command[offset] <= '9')
+    {
+        new digit = command[offset] - '0';
+        if (value > (MONEY_MAX_BALANCE - digit) / 10) return false;
+        value = value * 10 + digit;
+        offset++;
+    }
+    return command[offset] == ' ' || command[offset] == '\0';
+}
+
+stock bool:ParsePayArguments(const command[], &recipient, &amount)
+{
+    if (strfind(command, "/pay ", true) != 0) return false;
+    new offset = 5;
+    if (!ParseUnsignedPayNumber(command, offset, recipient)) return false;
+    if (command[offset] != ' ') return false;
+    if (!ParseUnsignedPayNumber(command, offset, amount)) return false;
+    while (command[offset] == ' ') offset++;
+    return command[offset] == '\0';
+}
+
+// Cash transfers are server-authoritative: balances and audit log are committed
+// atomically, and in-memory balances only change after a successful COMMIT.
+stock PayNearbyPlayer(playerid, targetid, amount)
+{
+    if (targetid < 0 || targetid >= MAX_PLAYERS ||
+        !IsPlayerConnected(targetid) || !gAuthenticated[targetid] ||
+        targetid == playerid)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Target player is offline or invalid.");
+        return 1;
+    }
+    if (amount < 1 || amount > PAY_MAX_AMOUNT)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Transfer must be between $1 and $5000.");
+        return 1;
+    }
+    if (gCash[playerid] < amount)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Not enough money for transfer.");
+        return 1;
+    }
+    if (gCash[targetid] > MONEY_MAX_BALANCE - amount)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Recipient reached maximum wallet balance.");
+        return 1;
+    }
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerState(targetid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerInterior(playerid) != GetPlayerInterior(targetid) ||
+        GetPlayerVirtualWorld(playerid) != GetPlayerVirtualWorld(targetid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Both players must be on foot in the same world.");
+        return 1;
+    }
+    new Float:x, Float:y, Float:z;
+    GetPlayerPos(playerid, x, y, z);
+    if (!IsPlayerInRangeOfPoint(targetid, PAY_MAX_DISTANCE, x, y, z))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Get closer to the recipient (5 meters).");
+        return 1;
+    }
+    new now = gettime();
+    if (gLastPayTime[playerid] != 0 &&
+        now - gLastPayTime[playerid] < PAY_COOLDOWN_SECONDS)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Wait 5 seconds between transfers.");
+        return 1;
+    }
+
+    new senderBefore = gCash[playerid];
+    new receiverBefore = gCash[targetid];
+    new senderAfter = senderBefore - amount;
+    new receiverAfter = receiverBefore + amount;
+    new query[350];
+
+    if (!ExecuteSql("BEGIN IMMEDIATE TRANSACTION"))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Transfer database busy. Try again.");
+        return 1;
+    }
+
+    // Compare balances to reject stale server memory and unexpected records.
+    format(query, sizeof(query),
+        "UPDATE accounts SET cash=%d WHERE nickname='%s' AND cash=%d",
+        senderAfter, gNicknames[playerid], senderBefore);
+    if (!ExecuteSql(query) || !SqlChangedOne())
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Could not debit sender. No money transferred.");
+        return 1;
+    }
+    format(query, sizeof(query),
+        "UPDATE accounts SET cash=%d WHERE nickname='%s' AND cash=%d",
+        receiverAfter, gNicknames[targetid], receiverBefore);
+    if (!ExecuteSql(query) || !SqlChangedOne())
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Recipient account changed. Transfer cancelled.");
+        return 1;
+    }
+    format(query, sizeof(query),
+        "INSERT INTO money_transfers (sender, recipient, amount) VALUES ('%s', '%s', %d)",
+        gNicknames[playerid], gNicknames[targetid], amount);
+    if (!ExecuteSql(query) || !ExecuteSql("COMMIT"))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Could not record transfer. No money transferred.");
+        return 1;
+    }
+
+    gCash[playerid] = senderAfter;
+    gCash[targetid] = receiverAfter;
+    GivePlayerMoney(playerid, -amount);
+    GivePlayerMoney(targetid, amount);
+    gLastPayTime[playerid] = now;
+
+    new line[156];
+    format(line, sizeof(line), "You paid %s $%d.", gNicknames[targetid], amount);
+    SendClientMessage(playerid, COLOR_PINK, line);
+    format(line, sizeof(line), "You received $%d from %s.", amount, gNicknames[playerid]);
+    SendClientMessage(targetid, COLOR_PINK, line);
+    return 1;
 }
 
 stock ShowAccountDialog(playerid)
@@ -1253,7 +1400,7 @@ stock EnterWorld(playerid)
         0, 0, 0, 0, 0, 0);
     SpawnPlayer(playerid);
     SendClientMessage(playerid, COLOR_PINK, "Welcome to SLAVIA ROLEPLAY!");
-    SendClientMessage(playerid, COLOR_WHITE, "Commands: /help, /inventory, /cars, /jobs.");
+    SendClientMessage(playerid, COLOR_WHITE, "Commands: /help, /pay, /inventory, /cars, /jobs.");
     return 1;
 }
 
@@ -1276,7 +1423,7 @@ stock SendLocalMessage(playerid, color, const message[], Float:radius)
 
 public OnGameModeInit()
 {
-    SetGameModeText("SLAVIA RP 0.7.0");
+    SetGameModeText("SLAVIA RP 0.8.0");
     ShowPlayerMarkers(PLAYER_MARKERS_MODE_OFF);
     EnableStuntBonusForAll(0);
     UsePlayerPedAnims();
@@ -1325,7 +1472,13 @@ public OnGameModeInit()
         return 0;
     }
     SetTimer("OnSlaviaFuelTick", CAR_FUEL_TICK_MS, true);
-    print("[SLAVIA] Accounts, courier, inventory, vehicles, fuel, locks and garage ready.");
+    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS money_transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL COLLATE NOCASE, recipient TEXT NOT NULL COLLATE NOCASE, amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND 5000), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
+    {
+        print("[SLAVIA] FATAL: cannot initialize transfer audit log.");
+        SendRconCommand("exit");
+        return 0;
+    }
+    print("[SLAVIA] Accounts, courier, inventory, vehicles, garage and transfers ready.");
     return 1;
 }
 
@@ -1564,7 +1717,27 @@ public OnPlayerCommandText(playerid, cmdtext[])
         SendClientMessage(playerid, COLOR_MUTED, "Vehicle control: /vspawn, /vpark, /vstore");
         SendClientMessage(playerid, COLOR_MUTED, "Fuel & security: /vstatus, /vlock, /refuel");
         SendClientMessage(playerid, COLOR_MUTED, "Garage: /garage, /gstore, /gspawn, /grepair, /vreturn.");
+        SendClientMessage(playerid, COLOR_PINK, "Players: /pay [playerid] [amount], /balance.");
         return 1;
+    }
+    if (!strcmp(cmdtext, "/balance", true))
+    {
+        new line[90];
+        format(line, sizeof(line), "Wallet balance: $%d", gCash[playerid]);
+        SendClientMessage(playerid, COLOR_PINK, line);
+        return 1;
+    }
+    if (!strcmp(cmdtext, "/pay", true) ||
+        strfind(cmdtext, "/pay ", true) == 0)
+    {
+        new targetid, amount;
+        if (!ParsePayArguments(cmdtext, targetid, amount))
+        {
+            SendClientMessage(playerid, COLOR_MUTED,
+                "Usage: /pay [playerid] [amount] (1-5000; within 5 meters).");
+            return 1;
+        }
+        return PayNearbyPlayer(playerid, targetid, amount);
     }
     if (!strcmp(cmdtext, "/stats", true))
     {
