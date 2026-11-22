@@ -22,7 +22,7 @@ park_car = re.findall(r'"(UPDATE owned_vehicles SET [^"]+)"', source)
 vehicle_state_buy = re.findall(r'"(INSERT INTO vehicle_state [^"]+)"', source)
 vehicle_state_upsert = re.findall(r'"(INSERT OR REPLACE INTO vehicle_state [^"]+)"', source)
 assert all(len(q) == 1 for q in (courier_sql, supplies_sql, buy_car, vehicle_state_buy))
-assert len(park_car) == 2
+assert len(park_car) == 3 and len(set(park_car)) == 1
 assert len(vehicle_state_upsert) == 2
 assert vehicle_state_upsert[0] == vehicle_state_upsert[1]
 
