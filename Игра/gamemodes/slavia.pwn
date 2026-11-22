@@ -1,11 +1,11 @@
 #include <a_samp>
 #include <samp_bcrypt>
 
-// SLAVIA ROLEPLAY 0.5.0: a small, independently written open.mp gamemode.
+// SLAVIA ROLEPLAY 0.6.0: a small, independently written open.mp gamemode.
 // Passwords are never saved as plain text. SQLite lives in scriptfiles/.
 // Production launch requires moderation, anti-cheat and deployment review.
 
-#define SLAVIA_VERSION      "0.5.0"
+#define SLAVIA_VERSION      "0.6.0"
 #define DATABASE_FILE       "slavia.db"
 #define DIALOG_REGISTER     (3400)
 #define DIALOG_LOGIN        (3401)
@@ -43,6 +43,10 @@
 #define CAR_FUEL_MAX      (100)
 #define CAR_FUEL_PRICE    (7)
 #define CAR_FUEL_TICK_MS  (30000)
+#define GARAGE_BAY_COUNT   (40)
+#define GARAGE_COLS        (5)
+#define GARAGE_RETURN_COST (200)
+#define GARAGE_RADIUS      (45.0)
 
 #define COLOR_WHITE         0xFFFFFFFF
 #define COLOR_PINK          0xF542A9FF
@@ -88,6 +92,7 @@ new Float:gCarParkX[MAX_PLAYERS], Float:gCarParkY[MAX_PLAYERS];
 new Float:gCarParkZ[MAX_PLAYERS], Float:gCarParkA[MAX_PLAYERS];
 new gCarFuel[MAX_PLAYERS];
 new bool:gCarLocked[MAX_PLAYERS];
+new gGarageBay[MAX_PLAYERS];
 
 forward OnSlaviaHashCreated(playerid, session);
 forward OnSlaviaPasswordChecked(playerid, bool:valid, session);
@@ -146,6 +151,7 @@ stock ResetSession(playerid)
     gCarParkA[playerid] = CAR_LOT_A;
     gCarFuel[playerid] = CAR_FUEL_MAX;
     gCarLocked[playerid] = false;
+    gGarageBay[playerid] = -1;
     return 1;
 }
 
@@ -658,12 +664,193 @@ public OnSlaviaFuelTick()
     return 1;
 }
 
+
+stock FindFreeGarageBay()
+{
+    new query[135], DBResult:result;
+    for (new bay = 0; bay < GARAGE_BAY_COUNT; bay++)
+    {
+        format(query, sizeof(query),
+            "SELECT slot FROM garage_bays WHERE slot=%d LIMIT 1", bay);
+        result = db_query(gDatabase, query);
+        if (!result) return -1;
+        new bool:taken = db_num_rows(result) > 0;
+        db_free_result(result);
+        if (!taken) return bay;
+    }
+    return -1;
+}
+
+stock GarageBayCoordinates(bay, &Float:x, &Float:y, &Float:z, &Float:angle)
+{
+    x = CAR_LOT_X + float(bay % GARAGE_COLS) * 5.0;
+    y = CAR_LOT_Y + float(bay / GARAGE_COLS) * 7.0;
+    z = CAR_LOT_Z;
+    angle = CAR_LOT_A;
+    return 1;
+}
+
+// Old v0.4-v0.5 vehicle owners receive a permanent garage bay on login.
+// No change to the legacy saved parking location until /vreturn is used.
+stock bool:EnsureGarageBay(playerid)
+{
+    if (gOwnedCarModel[playerid] == 0) return false;
+    if (gGarageBay[playerid] >= 0 && gGarageBay[playerid] < GARAGE_BAY_COUNT) return true;
+
+    new query[190], DBResult:result;
+    format(query, sizeof(query),
+        "SELECT slot FROM garage_bays WHERE nickname='%s' LIMIT 1", gNicknames[playerid]);
+    result = db_query(gDatabase, query);
+    if (!result) return false;
+    if (db_num_rows(result) > 0)
+    {
+        gGarageBay[playerid] = db_get_field_assoc_int(result, "slot");
+        db_free_result(result);
+        return gGarageBay[playerid] >= 0 && gGarageBay[playerid] < GARAGE_BAY_COUNT;
+    }
+    db_free_result(result);
+
+    // SQLite on this open.mp script runs queries sequentially.
+    // The unique constraint protects bays against an accidental duplicate.
+    new bay = FindFreeGarageBay();
+    if (bay < 0) return false;
+    format(query, sizeof(query),
+        "INSERT INTO garage_bays (nickname, slot) VALUES ('%s', %d)",
+        gNicknames[playerid], bay);
+    if (!ExecuteSql(query)) return false;
+    gGarageBay[playerid] = bay;
+    return true;
+}
+
+stock bool:PersonalCarHasOccupants(playerid)
+{
+    new vehicleid = gOwnedCarEntity[playerid];
+    if (vehicleid == INVALID_VEHICLE_ID) return false;
+    for (new viewer = 0; viewer < MAX_PLAYERS; viewer++)
+    {
+        if (!IsPlayerConnected(viewer)) continue;
+        new state = GetPlayerState(viewer);
+        if (state != PLAYER_STATE_DRIVER && state != PLAYER_STATE_PASSENGER) continue;
+        if (GetPlayerVehicleID(viewer) == vehicleid) return true;
+    }
+    return false;
+}
+
+stock ShowPersonalGarage(playerid)
+{
+    if (gOwnedCarModel[playerid] == 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "No personal vehicle. See /cars.");
+        return 1;
+    }
+    if (gGarageBay[playerid] < 0 && !EnsureGarageBay(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "No free garage bay. Contact an administrator.");
+        return 1;
+    }
+    new Float:x, Float:y, Float:z, Float:angle;
+    GarageBayCoordinates(gGarageBay[playerid], x, y, z, angle);
+    new line[170];
+    format(line, sizeof(line),
+        "Garage bay #%d near city hall | %s | Tow fee: $%d",
+        gGarageBay[playerid] + 1,
+        gOwnedCarModel[playerid] == CAR_MODEL_ECONOMY ? "Manana" : "Premier",
+        GARAGE_RETURN_COST);
+    SendClientMessage(playerid, COLOR_PINK, line);
+    format(line, sizeof(line), "Bay position: %.1f, %.1f | /vreturn at city hall", x, y);
+    SendClientMessage(playerid, COLOR_MUTED, line);
+    return 1;
+}
+
+// Tow personal vehicle back to its reserved garage bay.
+// Intentionally refuses to despawn a vehicle that anyone currently occupies.
+stock ReturnPersonalCarToGarage(playerid)
+{
+    if (gOwnedCarModel[playerid] == 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "You do not own a vehicle.");
+        return 1;
+    }
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0 ||
+        !IsPlayerInRangeOfPoint(playerid, GARAGE_RADIUS, START_X, START_Y, START_Z))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Return service is on foot near city hall.");
+        return 1;
+    }
+    if (gGarageBay[playerid] < 0 && !EnsureGarageBay(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Garage has no available bay.");
+        return 1;
+    }
+    if (PersonalCarHasOccupants(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Cannot tow an occupied vehicle.");
+        return 1;
+    }
+    if (gCash[playerid] < GARAGE_RETURN_COST)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Tow service costs $200. Not enough money.");
+        return 1;
+    }
+
+    new Float:x, Float:y, Float:z, Float:angle;
+    GarageBayCoordinates(gGarageBay[playerid], x, y, z, angle);
+    new newBalance = gCash[playerid] - GARAGE_RETURN_COST;
+    new query[370];
+
+    if (!ExecuteSql("BEGIN IMMEDIATE TRANSACTION"))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Garage database is busy.");
+        return 1;
+    }
+    format(query, sizeof(query),
+        "UPDATE accounts SET cash=%d WHERE nickname='%s'",
+        newBalance, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Garage payment failed. Money unchanged.");
+        return 1;
+    }
+    format(query, sizeof(query),
+        "UPDATE owned_vehicles SET x=%f, y=%f, z=%f, a=%f WHERE nickname='%s'",
+        x, y, z, angle, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Garage return failed. Parking unchanged.");
+        return 1;
+    }
+    if (!ExecuteSql("COMMIT"))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Garage transaction did not complete.");
+        return 1;
+    }
+
+    if (gOwnedCarEntity[playerid] != INVALID_VEHICLE_ID)
+    {
+        DestroyVehicle(gOwnedCarEntity[playerid]);
+        gOwnedCarEntity[playerid] = INVALID_VEHICLE_ID;
+    }
+    gCarParkX[playerid] = x;
+    gCarParkY[playerid] = y;
+    gCarParkZ[playerid] = z;
+    gCarParkA[playerid] = angle;
+    gCash[playerid] = newBalance;
+    GivePlayerMoney(playerid, -GARAGE_RETURN_COST);
+    SendClientMessage(playerid, COLOR_PINK,
+        "Car returned to your garage bay. Paid $200. Use /vspawn at the bay.");
+    return 1;
+}
+
 stock BuyPersonalCar(playerid, model)
 {
     if (model != CAR_MODEL_ECONOMY && model != CAR_MODEL_PREMIUM) return 0;
     if (gOwnedCarModel[playerid] != 0)
     {
-        SendClientMessage(playerid, COLOR_ERROR, "Only one owned car per character in v0.5.");
+        SendClientMessage(playerid, COLOR_ERROR, "Only one owned car per character in v0.6.");
         return 1;
     }
     if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
@@ -681,10 +868,14 @@ stock BuyPersonalCar(playerid, model)
         return 1;
     }
 
-    // Give different connected players different temporary starter parking slots.
-    new Float:x = CAR_LOT_X + float(playerid % 5) * 5.0;
-    new Float:y = CAR_LOT_Y + float(playerid / 5) * 7.0;
-    new Float:z = CAR_LOT_Z, Float:angle = CAR_LOT_A;
+    new bay = FindFreeGarageBay();
+    if (bay < 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Garage is full. Cannot buy another vehicle.");
+        return 1;
+    }
+    new Float:x, Float:y, Float:z, Float:angle;
+    GarageBayCoordinates(bay, x, y, z, angle);
     new newBalance = gCash[playerid] - cost, query[350];
 
     if (!ExecuteSql("BEGIN IMMEDIATE TRANSACTION")) return 0;
@@ -715,6 +906,15 @@ stock BuyPersonalCar(playerid, model)
         SendClientMessage(playerid, COLOR_ERROR, "Could not initialize vehicle state.");
         return 1;
     }
+    format(query, sizeof(query),
+        "INSERT INTO garage_bays (nickname, slot) VALUES ('%s', %d)",
+        gNicknames[playerid], bay);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Garage bay unavailable. Purchase cancelled.");
+        return 1;
+    }
     if (!ExecuteSql("COMMIT"))
     {
         ExecuteSql("ROLLBACK");
@@ -723,6 +923,7 @@ stock BuyPersonalCar(playerid, model)
     }
 
     gOwnedCarModel[playerid] = model;
+    gGarageBay[playerid] = bay;
     gCarFuel[playerid] = CAR_FUEL_MAX;
     gCarLocked[playerid] = false;
     gCarParkX[playerid] = x;
@@ -880,6 +1081,11 @@ stock EnterWorld(playerid)
         return 0;
     }
     gAuthenticated[playerid] = true;
+    if (gOwnedCarModel[playerid] != 0 && !EnsureGarageBay(playerid))
+    {
+        SendClientMessage(playerid, COLOR_ERROR,
+            "No garage bay assigned. Your vehicle is safe; contact admin.");
+    }
     gJoinedTick[playerid] = GetTickCount();
     SetSpawnInfo(playerid, 255, gSkin[playerid],
         gPosX[playerid], gPosY[playerid], gPosZ[playerid], gPosA[playerid],
@@ -909,7 +1115,7 @@ stock SendLocalMessage(playerid, color, const message[], Float:radius)
 
 public OnGameModeInit()
 {
-    SetGameModeText("SLAVIA RP 0.5.0");
+    SetGameModeText("SLAVIA RP 0.6.0");
     ShowPlayerMarkers(PLAYER_MARKERS_MODE_OFF);
     EnableStuntBonusForAll(0);
     UsePlayerPedAnims();
@@ -951,8 +1157,14 @@ public OnGameModeInit()
         SendRconCommand("exit");
         return 0;
     }
+    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS garage_bays (nickname TEXT PRIMARY KEY COLLATE NOCASE, slot INTEGER NOT NULL UNIQUE CHECK(slot >= 0 AND slot < 40))"))
+    {
+        print("[SLAVIA] FATAL: cannot initialize garage bays.");
+        SendRconCommand("exit");
+        return 0;
+    }
     SetTimer("OnSlaviaFuelTick", CAR_FUEL_TICK_MS, true);
-    print("[SLAVIA] Accounts, courier, inventory, vehicles, fuel and locks ready.");
+    print("[SLAVIA] Accounts, courier, inventory, vehicles, fuel, locks and garage ready.");
     return 1;
 }
 
@@ -1190,6 +1402,7 @@ public OnPlayerCommandText(playerid, cmdtext[])
         SendClientMessage(playerid, COLOR_PINK, "Vehicles: /cars, /buycar 1, /buycar 2, /mycar");
         SendClientMessage(playerid, COLOR_MUTED, "Vehicle control: /vspawn, /vpark, /vstore");
         SendClientMessage(playerid, COLOR_MUTED, "Fuel & security: /vstatus, /vlock, /refuel");
+        SendClientMessage(playerid, COLOR_MUTED, "Garage: /garage (bay), /vreturn (tow for $200).");
         return 1;
     }
     if (!strcmp(cmdtext, "/stats", true))
@@ -1254,6 +1467,8 @@ public OnPlayerCommandText(playerid, cmdtext[])
     if (!strcmp(cmdtext, "/vstatus", true)) return ShowVehicleStatus(playerid);
     if (!strcmp(cmdtext, "/vlock", true)) return ToggleVehicleLock(playerid);
     if (!strcmp(cmdtext, "/refuel", true)) return RefuelPersonalCar(playerid);
+    if (!strcmp(cmdtext, "/garage", true)) return ShowPersonalGarage(playerid);
+    if (!strcmp(cmdtext, "/vreturn", true)) return ReturnPersonalCarToGarage(playerid);
     if (!strcmp(cmdtext, "/jobs", true))
     {
         SendClientMessage(playerid, COLOR_PINK, "Courier: $250 for each successful delivery.");
