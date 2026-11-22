@@ -1,11 +1,11 @@
 #include <a_samp>
 #include <samp_bcrypt>
 
-// SLAVIA ROLEPLAY 0.4.0: a small, independently written open.mp gamemode.
+// SLAVIA ROLEPLAY 0.5.0: a small, independently written open.mp gamemode.
 // Passwords are never saved as plain text. SQLite lives in scriptfiles/.
 // Production launch requires moderation, anti-cheat and deployment review.
 
-#define SLAVIA_VERSION      "0.4.0"
+#define SLAVIA_VERSION      "0.5.0"
 #define DATABASE_FILE       "slavia.db"
 #define DIALOG_REGISTER     (3400)
 #define DIALOG_LOGIN        (3401)
@@ -40,6 +40,9 @@
 #define CAR_LOT_Y         (-1742.0)
 #define CAR_LOT_Z         (13.2)
 #define CAR_LOT_A         (90.0)
+#define CAR_FUEL_MAX      (100)
+#define CAR_FUEL_PRICE    (7)
+#define CAR_FUEL_TICK_MS  (30000)
 
 #define COLOR_WHITE         0xFFFFFFFF
 #define COLOR_PINK          0xF542A9FF
@@ -83,9 +86,12 @@ new gOwnedCarEntity[MAX_PLAYERS];
 new gCarLastSpawn[MAX_PLAYERS];
 new Float:gCarParkX[MAX_PLAYERS], Float:gCarParkY[MAX_PLAYERS];
 new Float:gCarParkZ[MAX_PLAYERS], Float:gCarParkA[MAX_PLAYERS];
+new gCarFuel[MAX_PLAYERS];
+new bool:gCarLocked[MAX_PLAYERS];
 
 forward OnSlaviaHashCreated(playerid, session);
 forward OnSlaviaPasswordChecked(playerid, bool:valid, session);
+forward OnSlaviaFuelTick();
 
 main()
 {
@@ -138,6 +144,8 @@ stock ResetSession(playerid)
     gCarParkY[playerid] = CAR_LOT_Y;
     gCarParkZ[playerid] = CAR_LOT_Z;
     gCarParkA[playerid] = CAR_LOT_A;
+    gCarFuel[playerid] = CAR_FUEL_MAX;
+    gCarLocked[playerid] = false;
     return 1;
 }
 
@@ -470,12 +478,192 @@ stock bool:LoadPersonalCar(playerid)
     return true;
 }
 
+
+stock bool:LoadVehicleState(playerid)
+{
+    gCarFuel[playerid] = CAR_FUEL_MAX;
+    gCarLocked[playerid] = false;
+    if (gOwnedCarModel[playerid] == 0) return true;
+
+    new query[240], DBResult:result;
+    format(query, sizeof(query),
+        "SELECT fuel, locked FROM vehicle_state WHERE nickname='%s' LIMIT 1",
+        gNicknames[playerid]);
+    result = db_query(gDatabase, query);
+    if (!result) return false;
+    if (db_num_rows(result) > 0)
+    {
+        gCarFuel[playerid] = db_get_field_assoc_int(result, "fuel");
+        gCarLocked[playerid] = db_get_field_assoc_int(result, "locked") != 0;
+        if (gCarFuel[playerid] < 0) gCarFuel[playerid] = 0;
+        if (gCarFuel[playerid] > CAR_FUEL_MAX) gCarFuel[playerid] = CAR_FUEL_MAX;
+    }
+    db_free_result(result);
+    return true;
+}
+
+stock bool:SaveVehicleState(playerid, fuel, locked)
+{
+    if (!gAuthenticated[playerid] || gOwnedCarModel[playerid] == 0 ||
+        fuel < 0 || fuel > CAR_FUEL_MAX || (locked != 0 && locked != 1)) return false;
+
+    new query[260];
+    format(query, sizeof(query),
+        "INSERT OR REPLACE INTO vehicle_state (nickname, fuel, locked) VALUES ('%s', %d, %d)",
+        gNicknames[playerid], fuel, locked);
+    return ExecuteSql(query);
+}
+
+stock RefreshVehicleLocks(playerid)
+{
+    if (gOwnedCarEntity[playerid] == INVALID_VEHICLE_ID) return 0;
+    for (new viewerid = 0; viewerid < MAX_PLAYERS; viewerid++)
+    {
+        if (!IsPlayerConnected(viewerid)) continue;
+        SetVehicleParamsForPlayer(gOwnedCarEntity[playerid], viewerid, 0,
+            (viewerid != playerid && gCarLocked[playerid]) ? 1 : 0);
+    }
+    return 1;
+}
+
+stock ToggleVehicleLock(playerid)
+{
+    if (gOwnedCarModel[playerid] == 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "You do not own a vehicle.");
+        return 1;
+    }
+    new nextLock = gCarLocked[playerid] ? 0 : 1;
+    if (!SaveVehicleState(playerid, gCarFuel[playerid], nextLock))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Could not save vehicle lock.");
+        return 1;
+    }
+    gCarLocked[playerid] = nextLock != 0;
+    RefreshVehicleLocks(playerid);
+    SendClientMessage(playerid, COLOR_PINK,
+        gCarLocked[playerid] ? "Personal vehicle locked." : "Personal vehicle unlocked.");
+    return 1;
+}
+
+stock RefuelPersonalCar(playerid)
+{
+    if (gOwnedCarModel[playerid] == 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Buy a vehicle before refuelling.");
+        return 1;
+    }
+    // Early service point: stored cars only, near city hall. Not a full gas station yet.
+    if (gOwnedCarEntity[playerid] != INVALID_VEHICLE_ID ||
+        GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
+        GetPlayerInterior(playerid) != 0 || GetPlayerVirtualWorld(playerid) != 0 ||
+        !IsPlayerInRangeOfPoint(playerid, CAR_BUY_RADIUS, START_X, START_Y, START_Z))
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Store your car, then refuel on foot near city hall.");
+        return 1;
+    }
+    new missing = CAR_FUEL_MAX - gCarFuel[playerid];
+    if (missing <= 0)
+    {
+        SendClientMessage(playerid, COLOR_MUTED, "Tank is already full.");
+        return 1;
+    }
+    new cost = missing * CAR_FUEL_PRICE;
+    if (gCash[playerid] < cost)
+    {
+        new line[128];
+        format(line, sizeof(line), "Refuel cost: $%d; not enough money.", cost);
+        SendClientMessage(playerid, COLOR_ERROR, line);
+        return 1;
+    }
+    new query[280], nextBalance = gCash[playerid] - cost;
+    if (!ExecuteSql("BEGIN IMMEDIATE TRANSACTION")) return 1;
+    format(query, sizeof(query),
+        "UPDATE accounts SET cash=%d WHERE nickname='%s'",
+        nextBalance, gNicknames[playerid]);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Refuel database error; no money charged.");
+        return 1;
+    }
+    format(query, sizeof(query),
+        "INSERT OR REPLACE INTO vehicle_state (nickname, fuel, locked) VALUES ('%s', %d, %d)",
+        gNicknames[playerid], CAR_FUEL_MAX, gCarLocked[playerid] ? 1 : 0);
+    if (!ExecuteSql(query) || !ExecuteSql("COMMIT"))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Refuel could not be saved.");
+        return 1;
+    }
+    gCash[playerid] = nextBalance;
+    gCarFuel[playerid] = CAR_FUEL_MAX;
+    GivePlayerMoney(playerid, -cost);
+    new line[120];
+    format(line, sizeof(line), "Tank refuelled: +%d fuel, paid $%d.", missing, cost);
+    SendClientMessage(playerid, COLOR_PINK, line);
+    return 1;
+}
+
+stock ShowVehicleStatus(playerid)
+{
+    if (gOwnedCarModel[playerid] == 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "No personal vehicle. Use /cars.");
+        return 1;
+    }
+    new line[150];
+    format(line, sizeof(line), "Vehicle: %s | Fuel: %d/%d | %s",
+        gOwnedCarModel[playerid] == CAR_MODEL_ECONOMY ? "Manana" : "Premier",
+        gCarFuel[playerid], CAR_FUEL_MAX,
+        gCarLocked[playerid] ? "Locked" : "Unlocked");
+    SendClientMessage(playerid, COLOR_PINK, line);
+    SendClientMessage(playerid, COLOR_MUTED, "/vlock - toggle lock, /refuel - refill stored car at city hall.");
+    return 1;
+}
+
+public OnSlaviaFuelTick()
+{
+    for (new playerid = 0; playerid < MAX_PLAYERS; playerid++)
+    {
+        if (!IsPlayerConnected(playerid) || !gAuthenticated[playerid] ||
+            gOwnedCarEntity[playerid] == INVALID_VEHICLE_ID ||
+            GetPlayerState(playerid) != PLAYER_STATE_DRIVER ||
+            GetPlayerVehicleID(playerid) != gOwnedCarEntity[playerid]) continue;
+
+        if (gCarFuel[playerid] == 0)
+        {
+            RemovePlayerFromVehicle(playerid);
+            continue;
+        }
+        new Float:velX, Float:velY, Float:velZ;
+        GetVehicleVelocity(gOwnedCarEntity[playerid], velX, velY, velZ);
+        // No consumption while parked/idling; one unit per active 30-second tick.
+        if (floatabs(velX) + floatabs(velY) < 0.04) continue;
+
+        new remaining = gCarFuel[playerid] - 1;
+        if (!SaveVehicleState(playerid, remaining, gCarLocked[playerid] ? 1 : 0))
+        {
+            SendClientMessage(playerid, COLOR_ERROR, "Cannot save fuel consumption.");
+            continue;
+        }
+        gCarFuel[playerid] = remaining;
+        if (remaining == 0)
+        {
+            SetVehicleVelocity(gOwnedCarEntity[playerid], 0.0, 0.0, 0.0);
+            RemovePlayerFromVehicle(playerid);
+            SendClientMessage(playerid, COLOR_ERROR, "Fuel exhausted. Store the car and refuel.");
+        }
+    }
+    return 1;
+}
+
 stock BuyPersonalCar(playerid, model)
 {
     if (model != CAR_MODEL_ECONOMY && model != CAR_MODEL_PREMIUM) return 0;
     if (gOwnedCarModel[playerid] != 0)
     {
-        SendClientMessage(playerid, COLOR_ERROR, "Only one owned car per character in v0.4.");
+        SendClientMessage(playerid, COLOR_ERROR, "Only one owned car per character in v0.5.");
         return 1;
     }
     if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
@@ -518,6 +706,15 @@ stock BuyPersonalCar(playerid, model)
         SendClientMessage(playerid, COLOR_ERROR, "Car purchase failed. Vehicle not issued.");
         return 1;
     }
+    format(query, sizeof(query),
+        "INSERT INTO vehicle_state (nickname, fuel, locked) VALUES ('%s', %d, 0)",
+        gNicknames[playerid], CAR_FUEL_MAX);
+    if (!ExecuteSql(query))
+    {
+        ExecuteSql("ROLLBACK");
+        SendClientMessage(playerid, COLOR_ERROR, "Could not initialize vehicle state.");
+        return 1;
+    }
     if (!ExecuteSql("COMMIT"))
     {
         ExecuteSql("ROLLBACK");
@@ -526,6 +723,8 @@ stock BuyPersonalCar(playerid, model)
     }
 
     gOwnedCarModel[playerid] = model;
+    gCarFuel[playerid] = CAR_FUEL_MAX;
+    gCarLocked[playerid] = false;
     gCarParkX[playerid] = x;
     gCarParkY[playerid] = y;
     gCarParkZ[playerid] = z;
@@ -548,6 +747,11 @@ stock SpawnPersonalCar(playerid)
     if (gOwnedCarEntity[playerid] != INVALID_VEHICLE_ID)
     {
         SendClientMessage(playerid, COLOR_MUTED, "Car already spawned. Use /vstore first.");
+        return 1;
+    }
+    if (gCarFuel[playerid] <= 0)
+    {
+        SendClientMessage(playerid, COLOR_ERROR, "Tank is empty. Use /refuel near city hall.");
         return 1;
     }
     if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT ||
@@ -575,6 +779,7 @@ stock SpawnPersonalCar(playerid)
     }
     gOwnedCarEntity[playerid] = vehicleid;
     gCarLastSpawn[playerid] = gettime();
+    RefreshVehicleLocks(playerid);
     SendClientMessage(playerid, COLOR_PINK, "Personal car spawned. /vpark /vstore.");
     return 1;
 }
@@ -666,7 +871,9 @@ stock SaveCharacter(playerid)
 
 stock EnterWorld(playerid)
 {
-    if (!LoadCharacter(playerid) || !LoadCourierProgress(playerid) || !LoadSupplies(playerid) || !LoadPersonalCar(playerid))
+    if (!LoadCharacter(playerid) || !LoadCourierProgress(playerid) ||
+        !LoadSupplies(playerid) || !LoadPersonalCar(playerid) ||
+        !LoadVehicleState(playerid))
     {
         SendClientMessage(playerid, COLOR_ERROR, "Could not load character. Reconnect later.");
         Kick(playerid);
@@ -702,7 +909,7 @@ stock SendLocalMessage(playerid, color, const message[], Float:radius)
 
 public OnGameModeInit()
 {
-    SetGameModeText("SLAVIA RP 0.4.0");
+    SetGameModeText("SLAVIA RP 0.5.0");
     ShowPlayerMarkers(PLAYER_MARKERS_MODE_OFF);
     EnableStuntBonusForAll(0);
     UsePlayerPedAnims();
@@ -738,7 +945,14 @@ public OnGameModeInit()
         SendRconCommand("exit");
         return 0;
     }
-    print("[SLAVIA] SQLite accounts, courier, inventory and vehicles initialized.");
+    if (!ExecuteSql("CREATE TABLE IF NOT EXISTS vehicle_state (nickname TEXT PRIMARY KEY COLLATE NOCASE, fuel INTEGER NOT NULL DEFAULT 100 CHECK(fuel BETWEEN 0 AND 100), locked INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0,1)))"))
+    {
+        print("[SLAVIA] FATAL: cannot initialize fuel and locks.");
+        SendRconCommand("exit");
+        return 0;
+    }
+    SetTimer("OnSlaviaFuelTick", CAR_FUEL_TICK_MS, true);
+    print("[SLAVIA] Accounts, courier, inventory, vehicles, fuel and locks ready.");
     return 1;
 }
 
@@ -975,6 +1189,7 @@ public OnPlayerCommandText(playerid, cmdtext[])
         SendClientMessage(playerid, COLOR_MUTED, "Medical: /usebandage, /usemedkit");
         SendClientMessage(playerid, COLOR_PINK, "Vehicles: /cars, /buycar 1, /buycar 2, /mycar");
         SendClientMessage(playerid, COLOR_MUTED, "Vehicle control: /vspawn, /vpark, /vstore");
+        SendClientMessage(playerid, COLOR_MUTED, "Fuel & security: /vstatus, /vlock, /refuel");
         return 1;
     }
     if (!strcmp(cmdtext, "/stats", true))
@@ -1036,6 +1251,9 @@ public OnPlayerCommandText(playerid, cmdtext[])
     if (!strcmp(cmdtext, "/vspawn", true)) return SpawnPersonalCar(playerid);
     if (!strcmp(cmdtext, "/vpark", true)) return ParkPersonalCar(playerid);
     if (!strcmp(cmdtext, "/vstore", true)) return StorePersonalCar(playerid);
+    if (!strcmp(cmdtext, "/vstatus", true)) return ShowVehicleStatus(playerid);
+    if (!strcmp(cmdtext, "/vlock", true)) return ToggleVehicleLock(playerid);
+    if (!strcmp(cmdtext, "/refuel", true)) return RefuelPersonalCar(playerid);
     if (!strcmp(cmdtext, "/jobs", true))
     {
         SendClientMessage(playerid, COLOR_PINK, "Courier: $250 for each successful delivery.");
@@ -1141,18 +1359,38 @@ public OnPlayerEnterCheckpoint(playerid)
 
 public OnPlayerStateChange(playerid, newstate, oldstate)
 {
-    // Driver seat belongs to the owner, but passengers are permitted.
-    if (newstate != PLAYER_STATE_DRIVER) return 1;
+    if (newstate != PLAYER_STATE_DRIVER && newstate != PLAYER_STATE_PASSENGER) return 1;
     new vehicleid = GetPlayerVehicleID(playerid);
     for (new ownerid = 0; ownerid < MAX_PLAYERS; ownerid++)
     {
         if (!IsPlayerConnected(ownerid) || !gAuthenticated[ownerid]) continue;
         if (gOwnedCarEntity[ownerid] != vehicleid) continue;
-        if (ownerid != playerid)
+
+        if (ownerid != playerid &&
+            (newstate == PLAYER_STATE_DRIVER || gCarLocked[ownerid]))
         {
             RemovePlayerFromVehicle(playerid);
-            SendClientMessage(playerid, COLOR_ERROR, "This personal car belongs to another player.");
+            SendClientMessage(playerid, COLOR_ERROR, "You cannot enter this personal car.");
         }
+        else if (ownerid == playerid && newstate == PLAYER_STATE_DRIVER &&
+                 gCarFuel[ownerid] <= 0)
+        {
+            RemovePlayerFromVehicle(playerid);
+            SendClientMessage(playerid, COLOR_ERROR, "Tank is empty. Refuel before driving.");
+        }
+        break;
+    }
+    return 1;
+}
+
+public OnVehicleStreamIn(vehicleid, forplayerid)
+{
+    for (new ownerid = 0; ownerid < MAX_PLAYERS; ownerid++)
+    {
+        if (!IsPlayerConnected(ownerid) || !gAuthenticated[ownerid]) continue;
+        if (gOwnedCarEntity[ownerid] != vehicleid) continue;
+        SetVehicleParamsForPlayer(vehicleid, forplayerid, 0,
+            (ownerid != forplayerid && gCarLocked[ownerid]) ? 1 : 0);
         break;
     }
     return 1;
