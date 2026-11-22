@@ -14,9 +14,9 @@ assert len(ddl) == 6 and "garage_bays" in ddl[-1]
 new_bays = re.findall(r'"(INSERT INTO garage_bays [^"]+)"', src)
 assert len(new_bays) == 2 and new_bays[0] == new_bays[1], "Both new and old owners need garage reservation"
 park = re.findall(r'"(UPDATE owned_vehicles SET [^"]+)"', src)
-assert len(park) == 2 and park[0] == park[1], "The valet must persist the same parking fields"
+assert len(park) == 3 and len(set(park)) == 1, "All parking operations must persist the same fields"
 cash = re.findall(r'"(UPDATE accounts SET cash=%d WHERE nickname=\'%s\')"', src)
-assert len(cash) == 5
+assert len(cash) == 6
 
 with tempfile.TemporaryDirectory() as root:
     path = Path(root) / "garage.db"
@@ -53,8 +53,14 @@ with tempfile.TemporaryDirectory() as root:
         db.execute(park[-1] % (999., 999., 3., 0., "OldOwner"))
         db.execute("ROLLBACK")
 
+        # Workshop: repair charge is saved before changing vehicle health in game.
+        # NewOwner has $500; $350 repair must leave $150 after reconnection.
+        db.execute(cash[-1] % (150, "NewOwner"))
+        db.commit()
+
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT cash FROM accounts WHERE nickname='OldOwner'").fetchone() == (300,)
+        assert db.execute("SELECT cash FROM accounts WHERE nickname='NewOwner'").fetchone() == (150,)
         assert db.execute("SELECT x,y,z,a FROM owned_vehicles WHERE nickname='OldOwner'").fetchone() == (1466.0,-1742.0,13.2,90.0)
         assert db.execute("SELECT slot FROM garage_bays WHERE nickname='OldOwner'").fetchone() == (0,)
         assert db.execute("SELECT slot FROM garage_bays WHERE nickname='NewOwner'").fetchone() == (1,)
@@ -62,3 +68,31 @@ with tempfile.TemporaryDirectory() as root:
         for sql in ddl: db.execute(sql)   # idempotent upgrade
 
 print("SLAVIA garage persistence, unique bays, rollback: PASS")
+
+# Static invariants in Pawn gameplay code: these complement SQL tests but
+# cannot replace real multiplayer testing.
+def function_body(start: str, end: str) -> str:
+    assert start in src and end in src, f"Pawn function missing: {start}"
+    return src.split(start, 1)[1].split(end, 1)[0]
+
+ordinary_store = function_body("stock StorePersonalCar(playerid)", "stock SaveCharacter(playerid)")
+assert "PersonalCarHasOccupants(playerid)" in ordinary_store
+assert "GetVehiclePos(gOwnedCarEntity[playerid]" in ordinary_store
+assert "IsPlayerInRangeOfPoint(playerid, 20.0, carX, carY, carZ)" in ordinary_store
+
+garage_store = function_body("stock StoreCarAtGarage(playerid)", "stock SpawnCarFromGarage(playerid)")
+assert "IsOwnedCarInGarageBay(playerid)" in garage_store
+assert "PersonalCarHasOccupants(playerid)" in garage_store
+assert garage_store.index("ExecuteSql(query)") < garage_store.index("DestroyVehicle(")
+
+garage_spawn = function_body("stock SpawnCarFromGarage(playerid)", "stock RepairCarAtGarage(playerid)")
+assert "IsPlayerAtOwnGarage(playerid)" in garage_spawn
+assert "return SpawnPersonalCar(playerid)" in garage_spawn
+assert "Car is parked elsewhere" in garage_spawn
+
+garage_repair = function_body("stock RepairCarAtGarage(playerid)", "stock BuyPersonalCar(playerid, model)")
+assert "IsOwnedCarInGarageBay(playerid)" in garage_repair
+assert "PersonalCarHasOccupants(playerid)" in garage_repair
+assert "GetVehicleHealth(" in garage_repair
+assert garage_repair.index("ExecuteSql(query)") < garage_repair.index("SetVehicleHealth(")
+print("SLAVIA garage proximity, occupancy and payment guards: PASS")

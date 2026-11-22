@@ -14,7 +14,7 @@ expected = ("accounts", "courier_progress", "supplies", "owned_vehicles", "vehic
 assert len(schema) == len(expected), f"Expected {len(expected)} Pawn CREATE TABLEs, got {len(schema)}"
 assert all(name in ddl for name, ddl in zip(expected, schema))
 cash_update = re.findall(r'"(UPDATE accounts SET cash=%d WHERE nickname=\'%s\')"', source)
-assert len(cash_update) == 5, f"Expected 5 wallet updates, got {len(cash_update)}"
+assert len(cash_update) == 6, f"Expected 6 wallet updates, got {len(cash_update)}"
 courier_sql = re.findall(r'"(INSERT OR REPLACE INTO courier_progress [^"]+)"', source)
 supplies_sql = re.findall(r'"(INSERT OR REPLACE INTO supplies [^"]+)"', source)
 buy_car = re.findall(r'"(INSERT INTO owned_vehicles [^"]+)"', source)
